@@ -70,20 +70,23 @@ public class GameServer {
         try {
             RegisteredPlayer human = RegisteredPlayer.forCommander(
                     loadPreconDeck("Subjective Reality [C18] [2018].dck"))
-                    .setPlayer(new LobbyPlayerRemote("Human (Aminatou)", humanChannel));
+                    .setPlayer(new LobbyPlayerRemote("Human (Aminatou)", humanChannel, humanChannel));
             // All seats - human and AI - go through RemotePlayerController.
             // AI seats route over HTTP to the same ai-bridge stub (currently
             // random); see RemotePlayerController's class comment for why it
-            // no longer embeds PlayerControllerAi as a blanket fallback.
+            // no longer embeds PlayerControllerAi as a blanket fallback. Each
+            // also gets a reference to the human's WebSocket as a
+            // "spectator channel" so the human's view stays live while AI
+            // seats act, not just during their own turn.
             RegisteredPlayer ai1 = RegisteredPlayer.forCommander(
                     loadPreconDeck("Veloci-Ramp-Tor [LCC] [2023].dck"))
-                    .setPlayer(new LobbyPlayerRemote("AI (Pantlaza)", new HttpChannel(aiBridgeUrl)));
+                    .setPlayer(new LobbyPlayerRemote("AI (Pantlaza)", new HttpChannel(aiBridgeUrl), humanChannel));
             RegisteredPlayer ai2 = RegisteredPlayer.forCommander(
                     loadPreconDeck("Explorers of the Deep [LCC] [2023].dck"))
-                    .setPlayer(new LobbyPlayerRemote("AI (Hakbal)", new HttpChannel(aiBridgeUrl)));
+                    .setPlayer(new LobbyPlayerRemote("AI (Hakbal)", new HttpChannel(aiBridgeUrl), humanChannel));
             RegisteredPlayer ai3 = RegisteredPlayer.forCommander(
                     loadPreconDeck("Temur Roar [TDC] [2025].dck"))
-                    .setPlayer(new LobbyPlayerRemote("AI (Eshki)", new HttpChannel(aiBridgeUrl)));
+                    .setPlayer(new LobbyPlayerRemote("AI (Eshki)", new HttpChannel(aiBridgeUrl), humanChannel));
 
             GameRules rules = new GameRules(GameType.Commander);
             Match match = new Match(rules, List.of(human, ai1, ai2, ai3), "Playtest");

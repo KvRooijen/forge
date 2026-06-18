@@ -45,4 +45,17 @@ public class WebSocketChannel implements RemoteChannel {
         ctx.send(new DecisionRequest(java.util.UUID.randomUUID().toString(), "GAME_OVER", outcome, null));
         ctx.closeSession();
     }
+
+    /**
+     * Fire-and-forget state push, not tied to a decision/response cycle.
+     * Lets the human's view stay live while other seats are acting, instead
+     * of only updating whenever the human itself is asked something.
+     */
+    public void pushState(GameStateView state) {
+        try {
+            ctx.send(new DecisionRequest(java.util.UUID.randomUUID().toString(), "STATE_UPDATE", null, null, state));
+        } catch (Exception e) {
+            // session likely closed/disconnected - nothing to do
+        }
+    }
 }

@@ -82,12 +82,15 @@ import java.util.function.Predicate;
 public class RemotePlayerController extends PlayerController {
 
     private final RemoteChannel channel;
+    private final forge.headless.protocol.WebSocketChannel spectatorChannel;
     private final PlayerControllerAi delegate;
     private final java.util.Random random = new java.util.Random();
 
-    public RemotePlayerController(Game game, Player p, LobbyPlayer lp, RemoteChannel channel) {
+    public RemotePlayerController(Game game, Player p, LobbyPlayer lp, RemoteChannel channel,
+            forge.headless.protocol.WebSocketChannel spectatorChannel) {
         super(game, p, lp);
         this.channel = channel;
+        this.spectatorChannel = spectatorChannel;
         this.delegate = new PlayerControllerAi(game, p,
                 new LobbyPlayerAi("fallback-ai-for-" + lp.getName(), EnumSet.noneOf(AIOption.class)));
     }
@@ -133,10 +136,56 @@ public class RemotePlayerController extends PlayerController {
     }
 
     private DecisionResponse ask(String type, String prompt, List<DecisionRequest.Option> options) {
-        return channel.ask(new DecisionRequest(UUID.randomUUID().toString(), type, prompt, options, buildStateView()));
+        return channel.ask(new DecisionRequest(UUID.randomUUID().toString(), type, prompt, options, safeBuildStateView(player)));
     }
 
-    private GameStateView buildStateView() {
+    /**
+     * Pushes a fresh state snapshot (from the human's perspective) to the
+     * human's WebSocket whenever anything happens, on any seat - not just
+     * when the human itself is asked something. Without this the human's
+     * view only updates on their own turn and looks stale/stuck the rest
+     * of the time, since decision requests (which normally carry state)
+     * mostly go to other seats.
+     */
+    private void pushSpectatorUpdate() {
+        if (spectatorChannel == null) {
+            return;
+        }
+        Player human = findPlayerForChannel(spectatorChannel);
+        if (human != null) {
+            GameStateView view = safeBuildStateView(human);
+            if (view != null) {
+                spectatorChannel.pushState(view);
+            }
+        }
+    }
+
+    private Player findPlayerForChannel(forge.headless.protocol.WebSocketChannel target) {
+        for (Player p : player.getGame().getPlayers()) {
+            if (p.getController() instanceof RemotePlayerController rpc && rpc.channel == target) {
+                return p;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * buildStateView() reads a lot of live, mutable game state - a future
+     * edge case there must never be allowed to propagate up and kill the
+     * whole game thread (the engine only wraps runGame() in a top-level
+     * try/catch with no GAME_OVER on failure, so an uncaught exception here
+     * leaves the client stuck on "waiting for game state" forever).
+     */
+    private GameStateView safeBuildStateView(Player viewer) {
+        try {
+            return buildStateView(viewer);
+        } catch (RuntimeException e) {
+            System.err.println("[RemotePlayerController] buildStateView failed, skipping this update: " + e);
+            return null;
+        }
+    }
+
+    private GameStateView buildStateView(Player viewer) {
         Game g = player.getGame();
         List<PlayerStateView> playerViews = new ArrayList<>();
         Player active = g.getPhaseHandler().getPlayerTurn();
@@ -144,14 +193,26 @@ public class RemotePlayerController extends PlayerController {
             playerViews.add(new PlayerStateView(
                     p.getName(),
                     p.getLife(),
-                    p == player,
+                    p == viewer,
                     p == active,
                     p.getCardsIn(ZoneType.Hand).size(),
-                    p == player ? toCardViews(p.getCardsIn(ZoneType.Hand)) : null,
+                    p == viewer ? toCardViews(p.getCardsIn(ZoneType.Hand)) : null,
                     toCardViews(p.getCardsIn(ZoneType.Battlefield)),
                     toCardViews(p.getCardsIn(ZoneType.Command))));
         }
-        return new GameStateView(g.getPhaseHandler().getTurn(), playerViews, toCardViews(g.getStackZone().getCards()));
+        List<String> log = new ArrayList<>();
+        for (forge.game.GameLogEntry entry : g.getGameLog().getLogEntries(null)) {
+            log.add(entry.toString());
+        }
+        int logStart = Math.max(0, log.size() - 30);
+        forge.game.phase.PhaseType phase = g.getPhaseHandler().getPhase();
+        return new GameStateView(
+                g.getPhaseHandler().getTurn(),
+                phase != null ? phase.nameForUi : "",
+                active != null ? active.getName() : null,
+                playerViews,
+                toCardViews(g.getStackZone().getCards()),
+                log.subList(logStart, log.size()));
     }
 
     private List<CardStateView> toCardViews(Iterable<Card> cards) {
@@ -213,6 +274,7 @@ public class RemotePlayerController extends PlayerController {
                 combat.addAttacker(c, defender);
             }
         }
+        pushSpectatorUpdate();
     }
 
     // ---- Everything else: simple non-AI defaults (see class comment) ----
@@ -384,6 +446,7 @@ public class RemotePlayerController extends PlayerController {
             delegate.declareBlockers(defender, combat);
             return null;
         }, null);
+        pushSpectatorUpdate();
     }
 
     @Override
@@ -554,6 +617,7 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
+        pushSpectatorUpdate();
         List<SpellAbility> legalPlays = new ArrayList<>();
         for (Card c : player.getCardsIn(ZoneType.Hand)) {
             legalPlays.addAll(c.getAllPossibleAbilities(player, true));
@@ -579,7 +643,9 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public boolean playChosenSpellAbility(SpellAbility sa) {
-        return safeDelegate(() -> delegate.playChosenSpellAbility(sa), false);
+        boolean result = safeDelegate(() -> delegate.playChosenSpellAbility(sa), false);
+        pushSpectatorUpdate();
+        return result;
     }
 
     @Override

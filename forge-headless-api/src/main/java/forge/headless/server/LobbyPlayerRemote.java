@@ -6,6 +6,7 @@ import forge.game.player.IGameEntitiesFactory;
 import forge.game.player.Player;
 import forge.game.player.PlayerController;
 import forge.headless.protocol.RemoteChannel;
+import forge.headless.protocol.WebSocketChannel;
 
 /**
  * A seat controlled remotely - either a human over WebSocket or an AI
@@ -15,21 +16,23 @@ import forge.headless.protocol.RemoteChannel;
 public class LobbyPlayerRemote extends LobbyPlayer implements IGameEntitiesFactory {
 
     private final RemoteChannel channel;
+    private final WebSocketChannel spectatorChannel;
 
-    public LobbyPlayerRemote(String name, RemoteChannel channel) {
+    public LobbyPlayerRemote(String name, RemoteChannel channel, WebSocketChannel spectatorChannel) {
         super(name);
         this.channel = channel;
+        this.spectatorChannel = spectatorChannel;
     }
 
     @Override
     public PlayerController createMindSlaveController(Player master, Player slave) {
-        return new RemotePlayerController(slave.getGame(), slave, this, channel);
+        return new RemotePlayerController(slave.getGame(), slave, this, channel, spectatorChannel);
     }
 
     @Override
     public Player createIngamePlayer(Game game, int id) {
         Player p = new Player(getName(), game, id);
-        p.setFirstController(new RemotePlayerController(game, p, this, channel));
+        p.setFirstController(new RemotePlayerController(game, p, this, channel, spectatorChannel));
         return p;
     }
 
