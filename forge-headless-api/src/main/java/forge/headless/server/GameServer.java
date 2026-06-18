@@ -5,6 +5,7 @@ import forge.ImageKeys;
 import forge.StaticData;
 import forge.deck.CardPool;
 import forge.deck.Deck;
+import forge.deck.DeckSection;
 import forge.game.Game;
 import forge.game.GameRules;
 import forge.game.GameType;
@@ -13,12 +14,14 @@ import forge.game.player.RegisteredPlayer;
 import forge.headless.protocol.DecisionResponse;
 import forge.headless.protocol.HttpChannel;
 import forge.headless.protocol.WebSocketChannel;
+import forge.item.PaperCard;
 import forge.util.Lang;
 import forge.util.Localizer;
 import io.javalin.Javalin;
 
 import java.io.File;
-import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -26,8 +29,8 @@ import java.util.concurrent.Executors;
 /**
  * Entry point for the headless engine server: one WebSocket endpoint for
  * the human seat, one outbound HTTP channel per AI seat pointed at the
- * Python ai-bridge. Deck/seat setup here is still hardcoded - real lobby
- * setup (N seats, deck import) is Phase 3.
+ * Python ai-bridge. Decks are still hardcoded; real deck import is
+ * Phase 5. This is a 3-player Commander pod: one human seat, two AI seats.
  */
 public class GameServer {
 
@@ -62,13 +65,15 @@ public class GameServer {
 
     private static void runGame(WebSocketChannel humanChannel, String aiBridgeUrl) {
         try {
-            RegisteredPlayer human = new RegisteredPlayer(buildMonoRedDeck("Human's Deck"))
+            RegisteredPlayer human = RegisteredPlayer.forCommander(buildKrenkoGoblinsDeck("Human's Deck"))
                     .setPlayer(new LobbyPlayerRemote("Human", humanChannel));
-            RegisteredPlayer ai = new RegisteredPlayer(buildMonoRedDeck("AI's Deck"))
-                    .setPlayer(new LobbyPlayerRemote("AI", new HttpChannel(aiBridgeUrl)));
+            RegisteredPlayer ai1 = RegisteredPlayer.forCommander(buildKrenkoGoblinsDeck("AI 1's Deck"))
+                    .setPlayer(new LobbyPlayerRemote("AI 1", new HttpChannel(aiBridgeUrl)));
+            RegisteredPlayer ai2 = RegisteredPlayer.forCommander(buildKrenkoGoblinsDeck("AI 2's Deck"))
+                    .setPlayer(new LobbyPlayerRemote("AI 2", new HttpChannel(aiBridgeUrl)));
 
-            GameRules rules = new GameRules(GameType.Constructed);
-            Match match = new Match(rules, Arrays.asList(human, ai), "Playtest");
+            GameRules rules = new GameRules(GameType.Commander);
+            Match match = new Match(rules, List.of(human, ai1, ai2), "Playtest");
             Game game = match.createGame();
             match.startGame(game);
 
@@ -79,13 +84,41 @@ public class GameServer {
         }
     }
 
-    private static Deck buildMonoRedDeck(String name) {
+    /**
+     * Resolves a commander + main deck list against Forge's card database.
+     * Throws immediately with the offending name if a card can't be found -
+     * this is the same resolution step real decklist import will need.
+     */
+    private static Deck resolveDeck(String name, String commanderName, List<String> mainCardNames) {
         Deck deck = new Deck(name);
+        deck.getOrCreate(DeckSection.Commander).add(resolveCard(commanderName));
         CardPool main = deck.getMain();
-        main.add(StaticData.instance().getCommonCards().getCard("Mountain"), 20);
-        main.add(StaticData.instance().getCommonCards().getCard("Goblin Piker"), 6);
-        main.add(StaticData.instance().getCommonCards().getCard("Hill Giant"), 6);
-        main.add(StaticData.instance().getCommonCards().getCard("Shock"), 8);
+        for (String cardName : mainCardNames) {
+            main.add(resolveCard(cardName));
+        }
+        return deck;
+    }
+
+    private static PaperCard resolveCard(String name) {
+        PaperCard card = StaticData.instance().getCommonCards().getCard(name);
+        if (card == null) {
+            throw new IllegalArgumentException("Unknown card: " + name);
+        }
+        return card;
+    }
+
+    private static Deck buildKrenkoGoblinsDeck(String name) {
+        List<String> spells = new ArrayList<>(List.of(
+                "Goblin Bushwhacker", "Goblin Warchief", "Goblin Matron", "Goblin Recruiter",
+                "Goblin Piledriver", "Mogg War Marshal", "Hellrider", "Fanatical Firebrand",
+                "Reckless One", "War Horn", "Lightning Strike", "Fireblast", "Chain Lightning",
+                "Browbeat", "Wheel of Fortune", "Burning of Xinye", "Rite of Flame", "Dragon Fodder",
+                "Krenko, Tin Street Kingpin", "Mardu Strike Leader", "Skirk Commando",
+                "Boggart Shenanigans", "Goblin Sharpshooter", "Goblin Lackey", "Lightning Greaves",
+                "Skullclamp", "Goblin Chieftain", "Goblin King", "Skirk Prospector", "Mogg Fanatic",
+                "Lightning Bolt", "Sol Ring", "Arcane Signet", "Commander's Sphere", "Swiftfoot Boots"));
+        Deck deck = resolveDeck(name, "Krenko, Mob Boss", spells);
+        deck.getMain().add(resolveCard("Mountain"), 28);
         return deck;
     }
 

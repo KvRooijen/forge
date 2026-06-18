@@ -457,13 +457,27 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
-        List<SpellAbility> suggestion = delegate.chooseSpellAbilityToPlay();
-        if (suggestion == null || suggestion.isEmpty()) {
-            return suggestion;
+        List<SpellAbility> legalPlays = new ArrayList<>();
+        for (Card c : player.getCardsIn(ZoneType.Hand)) {
+            legalPlays.addAll(c.getAllPossibleAbilities(player, true));
         }
-        DecisionResponse resp = ask("CONFIRM_ACTION", "Play: " + suggestion.get(0), null);
-        boolean approved = resp.booleanValue != null ? resp.booleanValue : false;
-        return approved ? suggestion : null;
+        for (Card c : player.getCardsIn(ZoneType.Battlefield)) {
+            legalPlays.addAll(c.getAllPossibleAbilities(player, true));
+        }
+        if (legalPlays.isEmpty()) {
+            return null;
+        }
+
+        List<DecisionRequest.Option> options = new ArrayList<>();
+        for (int i = 0; i < legalPlays.size(); i++) {
+            options.add(new DecisionRequest.Option(String.valueOf(i), legalPlays.get(i).toString()));
+        }
+        DecisionResponse resp = ask("CHOOSE_SPELL_ABILITY", "Choose a play, or none to pass priority", options);
+        if (resp.chosenIds == null || resp.chosenIds.isEmpty()) {
+            return null;
+        }
+        int chosenIndex = Integer.parseInt(resp.chosenIds.get(0));
+        return List.of(legalPlays.get(chosenIndex));
     }
 
     @Override
