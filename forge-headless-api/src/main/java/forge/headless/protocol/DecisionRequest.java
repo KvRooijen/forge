@@ -12,6 +12,7 @@ public class DecisionRequest {
     public String type;
     public String prompt;
     public List<Option> options;
+    public GameStateView state;
 
     public DecisionRequest() { }
 
@@ -20,6 +21,14 @@ public class DecisionRequest {
         this.type = type;
         this.prompt = prompt;
         this.options = options;
+    }
+
+    public DecisionRequest(String id, String type, String prompt, List<Option> options, GameStateView state) {
+        this.id = id;
+        this.type = type;
+        this.prompt = prompt;
+        this.options = options;
+        this.state = state;
     }
 
     public static class Option {

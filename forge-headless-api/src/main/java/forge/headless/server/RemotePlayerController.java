@@ -46,8 +46,11 @@ import forge.game.staticability.StaticAbility;
 import forge.game.trigger.WrappedAbility;
 import forge.game.zone.PlayerZone;
 import forge.game.zone.ZoneType;
+import forge.headless.protocol.CardStateView;
 import forge.headless.protocol.DecisionRequest;
 import forge.headless.protocol.DecisionResponse;
+import forge.headless.protocol.GameStateView;
+import forge.headless.protocol.PlayerStateView;
 import forge.headless.protocol.RemoteChannel;
 import forge.item.PaperCard;
 import forge.util.ITriggerEvent;
@@ -83,7 +86,44 @@ public class RemotePlayerController extends PlayerController {
     }
 
     private DecisionResponse ask(String type, String prompt, List<DecisionRequest.Option> options) {
-        return channel.ask(new DecisionRequest(UUID.randomUUID().toString(), type, prompt, options));
+        return channel.ask(new DecisionRequest(UUID.randomUUID().toString(), type, prompt, options, buildStateView()));
+    }
+
+    private GameStateView buildStateView() {
+        Game g = player.getGame();
+        List<PlayerStateView> playerViews = new ArrayList<>();
+        Player active = g.getPhaseHandler().getPlayerTurn();
+        for (Player p : g.getPlayers()) {
+            playerViews.add(new PlayerStateView(
+                    p.getName(),
+                    p.getLife(),
+                    p == player,
+                    p == active,
+                    p.getCardsIn(ZoneType.Hand).size(),
+                    p == player ? toCardViews(p.getCardsIn(ZoneType.Hand)) : null,
+                    toCardViews(p.getCardsIn(ZoneType.Battlefield)),
+                    toCardViews(p.getCardsIn(ZoneType.Command))));
+        }
+        return new GameStateView(g.getPhaseHandler().getTurn(), playerViews, toCardViews(g.getStackZone().getCards()));
+    }
+
+    private List<CardStateView> toCardViews(Iterable<Card> cards) {
+        List<CardStateView> views = new ArrayList<>();
+        for (Card c : cards) {
+            if (c.getType().toString().isEmpty()) {
+                continue;
+            }
+            views.add(new CardStateView(
+                    String.valueOf(c.getId()),
+                    c.getName(),
+                    c.getManaCost() != null ? c.getManaCost().toString() : "",
+                    c.getType().toString(),
+                    c.isCreature() ? c.getNetPower() : null,
+                    c.isCreature() ? c.getNetToughness() : null,
+                    c.isTapped(),
+                    c.isCommander()));
+        }
+        return views;
     }
 
     // ---- Decisions wired to the remote channel ----
