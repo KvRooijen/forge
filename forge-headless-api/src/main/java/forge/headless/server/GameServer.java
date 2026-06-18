@@ -45,6 +45,10 @@ public class GameServer {
 
         app.ws("/ws/game", ws -> {
             ws.onConnect(ctx -> {
+                // Default Jetty idle timeout is 30s, far too short for a human
+                // actually thinking about a decision - they'd get silently
+                // disconnected mid-game with no visible error.
+                ctx.session.setIdleTimeout(java.time.Duration.ofHours(2));
                 WebSocketChannel channel = new WebSocketChannel(ctx);
                 channelsBySession.put(ctx.sessionId(), channel);
                 Executors.newSingleThreadExecutor().submit(() -> runGame(channel, aiBridgeUrl));
@@ -67,6 +71,10 @@ public class GameServer {
             RegisteredPlayer human = RegisteredPlayer.forCommander(
                     loadPreconDeck("Subjective Reality [C18] [2018].dck"))
                     .setPlayer(new LobbyPlayerRemote("Human (Aminatou)", humanChannel));
+            // All seats - human and AI - go through RemotePlayerController.
+            // AI seats route over HTTP to the same ai-bridge stub (currently
+            // random); see RemotePlayerController's class comment for why it
+            // no longer embeds PlayerControllerAi as a blanket fallback.
             RegisteredPlayer ai1 = RegisteredPlayer.forCommander(
                     loadPreconDeck("Veloci-Ramp-Tor [LCC] [2023].dck"))
                     .setPlayer(new LobbyPlayerRemote("AI (Pantlaza)", new HttpChannel(aiBridgeUrl)));

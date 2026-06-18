@@ -67,22 +67,69 @@ import java.util.UUID;
 import java.util.function.Predicate;
 
 /**
- * Routes a handful of decisions to a remote client (human over WebSocket,
- * or AI bridge over HTTP) and falls back to an embedded PlayerControllerAi
- * for everything else. The fallback exists so the engine never gets stuck
- * waiting on a decision type we haven't wired up yet - this is meant to
- * grow as the frontend/AI bridge grow, not to be complete on day one.
+ * Routes decisions to a remote client (human over WebSocket, or AI bridge
+ * over HTTP). Everything not explicitly wired falls back to simple,
+ * non-strategic defaults (decline/first/random) rather than an embedded
+ * PlayerControllerAi - forge-ai's per-ability evaluator classes routinely
+ * cast a player's controller to PlayerControllerAi (e.g. ManaAi,
+ * DamageDealAi), which breaks the moment that player's *actual* attached
+ * controller is this class instead. Mana/cost payment is the one cluster
+ * still routed through an embedded delegate (no headless-safe alternative
+ * exists yet - forge-ai's payment logic is AI-evaluation-coupled, and
+ * forge-gui's is Swing-widget-coupled), guarded so a failure there can't
+ * take down the whole game thread.
  */
 public class RemotePlayerController extends PlayerController {
 
     private final RemoteChannel channel;
     private final PlayerControllerAi delegate;
+    private final java.util.Random random = new java.util.Random();
 
     public RemotePlayerController(Game game, Player p, LobbyPlayer lp, RemoteChannel channel) {
         super(game, p, lp);
         this.channel = channel;
         this.delegate = new PlayerControllerAi(game, p,
                 new LobbyPlayerAi("fallback-ai-for-" + lp.getName(), EnumSet.noneOf(AIOption.class)));
+    }
+
+    // ---- Generic non-AI fallback helpers ----
+
+    private <T> T pickOne(List<T> options) {
+        return (options == null || options.isEmpty()) ? null : options.get(random.nextInt(options.size()));
+    }
+
+    private <T> T pickOne(Iterable<T> options) {
+        return pickOne(toList(options));
+    }
+
+    private <T> List<T> toList(Iterable<T> options) {
+        List<T> list = new ArrayList<>();
+        if (options != null) {
+            for (T t : options) {
+                list.add(t);
+            }
+        }
+        return list;
+    }
+
+    private <T> List<T> pickN(Iterable<T> options, int n) {
+        List<T> list = toList(options);
+        java.util.Collections.shuffle(list, random);
+        return new ArrayList<>(list.subList(0, Math.min(Math.max(n, 0), list.size())));
+    }
+
+    private boolean randomBoolean() {
+        return random.nextBoolean();
+    }
+
+    private <T> T safeDelegate(java.util.function.Supplier<T> call, T fallback) {
+        try {
+            return call.get();
+        } catch (RuntimeException e) {
+            System.err.println("[RemotePlayerController] cost/mana delegate call failed for "
+                    + player.getName() + ", falling back: " + e);
+            return fallback;
+        }
     }
 
     private DecisionResponse ask(String type, String prompt, List<DecisionRequest.Option> options) {
@@ -168,331 +215,341 @@ public class RemotePlayerController extends PlayerController {
         }
     }
 
-    // ---- Everything else: forward to the embedded AI ----
+    // ---- Everything else: simple non-AI defaults (see class comment) ----
 
     @Override
     public SpellAbility getAbilityToPlay(Card hostCard, List<SpellAbility> abilities, ITriggerEvent triggerEvent) {
-        return delegate.getAbilityToPlay(hostCard, abilities, triggerEvent);
+        return pickOne(abilities);
     }
 
     @Override
     public void playSpellAbilityNoStack(SpellAbility effectSA, boolean mayChoseNewTargets) {
-        delegate.playSpellAbilityNoStack(effectSA, mayChoseNewTargets);
+        safeDelegate(() -> {
+            delegate.playSpellAbilityNoStack(effectSA, mayChoseNewTargets);
+            return null;
+        }, null);
     }
 
     @Override
     public List<SpellAbility> orderSimultaneousSa(List<SpellAbility> activePlayerSAs) {
-        return delegate.orderSimultaneousSa(activePlayerSAs);
+        return activePlayerSAs;
     }
 
     @Override
     public void orderAndPlaySimultaneousSa(List<SpellAbility> activePlayerSAs) {
-        delegate.orderAndPlaySimultaneousSa(activePlayerSAs);
+        safeDelegate(() -> {
+            delegate.orderAndPlaySimultaneousSa(activePlayerSAs);
+            return null;
+        }, null);
     }
 
     @Override
     public boolean playTrigger(Card host, WrappedAbility wrapperAbility, boolean isMandatory) {
-        return delegate.playTrigger(host, wrapperAbility, isMandatory);
+        return isMandatory || randomBoolean();
     }
 
     @Override
     public boolean playSaFromPlayEffect(SpellAbility tgtSA) {
-        return delegate.playSaFromPlayEffect(tgtSA);
+        return randomBoolean();
     }
 
     @Override
     public List<PaperCard> sideboard(Deck deck, GameType gameType, String message) {
-        return delegate.sideboard(deck, gameType, message);
+        return new ArrayList<>();
     }
 
     @Override
     public List<PaperCard> chooseCardsYouWonToAddToDeck(List<PaperCard> losses) {
-        return delegate.chooseCardsYouWonToAddToDeck(losses);
+        return new ArrayList<>();
     }
 
     @Override
     public Map<Card, Integer> assignCombatDamage(Card attacker, CardCollectionView blockers, CardCollectionView remaining, int damageDealt, GameEntity defender, boolean overrideOrder) {
-        return delegate.assignCombatDamage(attacker, blockers, remaining, damageDealt, defender, overrideOrder);
+        return safeDelegate(() -> delegate.assignCombatDamage(attacker, blockers, remaining, damageDealt, defender, overrideOrder), new java.util.HashMap<>());
     }
 
     @Override
     public Map<GameEntity, Integer> divideShield(Card effectSource, Map<GameEntity, Integer> affected, int shieldAmount) {
-        return delegate.divideShield(effectSource, affected, shieldAmount);
+        return safeDelegate(() -> delegate.divideShield(effectSource, affected, shieldAmount), new java.util.HashMap<>());
     }
 
     @Override
     public Map<Byte, Integer> specifyManaCombo(SpellAbility sa, ColorSet colorSet, int manaAmount, boolean different) {
-        return delegate.specifyManaCombo(sa, colorSet, manaAmount, different);
+        return safeDelegate(() -> delegate.specifyManaCombo(sa, colorSet, manaAmount, different), new java.util.HashMap<>());
     }
 
     @Override
     public CardCollectionView choosePermanentsToSacrifice(SpellAbility sa, int min, int max, CardCollectionView validTargets, String message) {
-        return delegate.choosePermanentsToSacrifice(sa, min, max, validTargets, message);
+        return new CardCollection(pickN(validTargets, min));
     }
 
     @Override
     public CardCollectionView choosePermanentsToDestroy(SpellAbility sa, int min, int max, CardCollectionView validTargets, String message) {
-        return delegate.choosePermanentsToDestroy(sa, min, max, validTargets, message);
+        return new CardCollection(pickN(validTargets, min));
     }
 
     @Override
     public Integer announceRequirements(SpellAbility ability, int min, int max, String announce) {
-        return delegate.announceRequirements(ability, min, max, announce);
+        return min;
     }
 
     @Override
     public TargetChoices chooseNewTargetsFor(SpellAbility ability, Predicate<GameObject> filter, boolean optional) {
-        return delegate.chooseNewTargetsFor(ability, filter, optional);
+        return safeDelegate(() -> delegate.chooseNewTargetsFor(ability, filter, optional), null);
     }
 
     @Override
     public boolean chooseTargetsFor(SpellAbility currentAbility) {
-        return delegate.chooseTargetsFor(currentAbility);
+        return safeDelegate(() -> delegate.chooseTargetsFor(currentAbility), false);
     }
 
     @Override
     public Pair<SpellAbilityStackInstance, GameObject> chooseTarget(SpellAbility sa, List<Pair<SpellAbilityStackInstance, GameObject>> allTargets) {
-        return delegate.chooseTarget(sa, allTargets);
+        return pickOne(allTargets);
     }
 
     @Override
     public boolean helpPayForAssistSpell(ManaCostBeingPaid cost, SpellAbility sa, int max, int requested) {
-        return delegate.helpPayForAssistSpell(cost, sa, max, requested);
+        return false;
     }
 
     @Override
     public Player choosePlayerToAssistPayment(FCollectionView<Player> optionList, SpellAbility sa, String title, int max) {
-        return delegate.choosePlayerToAssistPayment(optionList, sa, title, max);
+        return null;
     }
 
     @Override
     public CardCollectionView chooseCardsForEffect(CardCollectionView sourceList, SpellAbility sa, String title, int min, int max, boolean isOptional, Map<String, Object> params) {
-        return delegate.chooseCardsForEffect(sourceList, sa, title, min, max, isOptional, params);
+        return new CardCollection(pickN(sourceList, isOptional ? 0 : min));
     }
 
     @Override
     public CardCollection chooseCardsForEffectMultiple(Map<String, CardCollection> validMap, SpellAbility sa, String title, boolean isOptional) {
-        return delegate.chooseCardsForEffectMultiple(validMap, sa, title, isOptional);
+        return new CardCollection();
     }
 
     @Override
     public <T extends GameEntity> T chooseSingleEntityForEffect(FCollectionView<T> optionList, DelayedReveal delayedReveal, SpellAbility sa, String title, boolean isOptional, Player relatedPlayer, Map<String, Object> params) {
-        return delegate.chooseSingleEntityForEffect(optionList, delayedReveal, sa, title, isOptional, relatedPlayer, params);
+        return (isOptional && randomBoolean()) ? null : pickOne(optionList);
     }
 
     @Override
     public <T extends GameEntity> List<T> chooseEntitiesForEffect(FCollectionView<T> optionList, int min, int max, DelayedReveal delayedReveal, SpellAbility sa, String title, Player relatedPlayer, Map<String, Object> params) {
-        return delegate.chooseEntitiesForEffect(optionList, min, max, delayedReveal, sa, title, relatedPlayer, params);
+        return pickN(optionList, min);
     }
 
     @Override
     public List<SpellAbility> chooseSpellAbilitiesForEffect(List<SpellAbility> spells, SpellAbility sa, String title, int num, Map<String, Object> params) {
-        return delegate.chooseSpellAbilitiesForEffect(spells, sa, title, num, params);
+        return pickN(spells, num);
     }
 
     @Override
     public SpellAbility chooseSingleSpellForEffect(List<SpellAbility> spells, SpellAbility sa, String title, Map<String, Object> params) {
-        return delegate.chooseSingleSpellForEffect(spells, sa, title, params);
+        return pickOne(spells);
     }
 
     @Override
     public boolean confirmBidAction(SpellAbility sa, PlayerActionConfirmMode bidlife, String string, int bid, Player winner) {
-        return delegate.confirmBidAction(sa, bidlife, string, bid, winner);
+        return randomBoolean();
     }
 
     @Override
     public boolean confirmReplacementEffect(ReplacementEffect replacementEffect, SpellAbility effectSA, GameEntity affected, String question) {
-        return delegate.confirmReplacementEffect(replacementEffect, effectSA, affected, question);
+        return randomBoolean();
     }
 
     @Override
     public boolean confirmStaticApplication(Card hostCard, PlayerActionConfirmMode mode, String message, String logic) {
-        return delegate.confirmStaticApplication(hostCard, mode, message, logic);
+        return randomBoolean();
     }
 
     @Override
     public boolean confirmTrigger(WrappedAbility sa) {
-        return delegate.confirmTrigger(sa);
+        return randomBoolean();
     }
 
     @Override
     public List<Card> exertAttackers(List<Card> attackers) {
-        return delegate.exertAttackers(attackers);
+        return new ArrayList<>();
     }
 
     @Override
     public List<Card> enlistAttackers(List<Card> attackers) {
-        return delegate.enlistAttackers(attackers);
+        return new ArrayList<>();
     }
 
     @Override
     public void declareBlockers(Player defender, Combat combat) {
-        delegate.declareBlockers(defender, combat);
+        safeDelegate(() -> {
+            delegate.declareBlockers(defender, combat);
+            return null;
+        }, null);
     }
 
     @Override
     public CardCollection orderBlockers(Card attacker, CardCollection blockers) {
-        return delegate.orderBlockers(attacker, blockers);
+        return blockers;
     }
 
     @Override
     public CardCollection orderBlocker(Card attacker, Card blocker, CardCollection oldBlockers) {
-        return delegate.orderBlocker(attacker, blocker, oldBlockers);
+        return oldBlockers;
     }
 
     @Override
     public CardCollection orderAttackers(Card blocker, CardCollection attackers) {
-        return delegate.orderAttackers(blocker, attackers);
+        return attackers;
     }
 
     @Override
     public void reveal(CardCollectionView cards, ZoneType zone, Player owner, String messagePrefix, boolean addMsgSuffix) {
-        delegate.reveal(cards, zone, owner, messagePrefix, addMsgSuffix);
+        // no-op: nobody needs to be shown anything outside the state snapshot
     }
 
     @Override
     public void reveal(List<CardView> cards, ZoneType zone, PlayerView owner, String messagePrefix, boolean addMsgSuffix) {
-        delegate.reveal(cards, zone, owner, messagePrefix, addMsgSuffix);
+        // no-op
     }
 
     @Override
     public void notifyOfValue(SpellAbility saSource, GameObject realtedTarget, String value) {
-        delegate.notifyOfValue(saSource, realtedTarget, value);
+        // no-op
     }
 
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForScry(CardCollection topN) {
-        return delegate.arrangeForScry(topN);
+        return new ImmutablePair<>(topN, new CardCollection());
     }
 
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) {
-        return delegate.arrangeForSurveil(topN);
+        return new ImmutablePair<>(topN, new CardCollection());
     }
 
     @Override
     public boolean willPutCardOnTop(Card c) {
-        return delegate.willPutCardOnTop(c);
+        return randomBoolean();
     }
 
     @Override
     public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone, SpellAbility source) {
-        return delegate.orderMoveToZoneList(cards, destinationZone, source);
+        return cards;
     }
 
     @Override
     public CardCollectionView chooseCardsToDiscardFrom(Player playerDiscard, SpellAbility sa, CardCollection validCards, int min, int max, CardCollectionView visibleToChooser) {
-        return delegate.chooseCardsToDiscardFrom(playerDiscard, sa, validCards, min, max, visibleToChooser);
+        return new CardCollection(pickN(validCards, min));
     }
 
     @Override
     public CardCollectionView chooseCardsToDiscardUnlessType(int min, CardCollectionView hand, String[] unlessTypes, SpellAbility sa) {
-        return delegate.chooseCardsToDiscardUnlessType(min, hand, unlessTypes, sa);
+        return new CardCollection(pickN(hand, min));
     }
 
     @Override
     public CardCollection chooseCardsToDiscardToMaximumHandSize(int numDiscard) {
-        return delegate.chooseCardsToDiscardToMaximumHandSize(numDiscard);
+        return new CardCollection(pickN(player.getCardsIn(ZoneType.Hand), numDiscard));
     }
 
     @Override
     public CardCollectionView chooseCardsToDelve(int genericAmount, CardCollection grave) {
-        return delegate.chooseCardsToDelve(genericAmount, grave);
+        return new CardCollection();
     }
 
     @Override
     public Map<Card, ManaCostShard> chooseCardsForConvokeOrImprovise(SpellAbility sa, ManaCost manaCost, CardCollectionView untappedCards, boolean artifacts, boolean creatures, Integer maxReduction) {
-        return delegate.chooseCardsForConvokeOrImprovise(sa, manaCost, untappedCards, artifacts, creatures, maxReduction);
+        return new java.util.HashMap<>();
     }
 
     @Override
     public List<Card> chooseCardsForSplice(SpellAbility sa, List<Card> cards) {
-        return delegate.chooseCardsForSplice(sa, cards);
+        return new ArrayList<>();
     }
 
     @Override
     public CardCollectionView chooseCardsToRevealFromHand(int min, int max, CardCollectionView valid) {
-        return delegate.chooseCardsToRevealFromHand(min, max, valid);
+        return new CardCollection(pickN(valid, min));
     }
 
     @Override
     public List<SpellAbility> chooseSaToActivateFromOpeningHand(List<SpellAbility> usableFromOpeningHand) {
-        return delegate.chooseSaToActivateFromOpeningHand(usableFromOpeningHand);
+        return new ArrayList<>();
     }
 
     @Override
     public Player chooseStartingPlayer(boolean isFirstGame) {
-        return delegate.chooseStartingPlayer(isFirstGame);
+        return player;
     }
 
     @Override
     public PlayerZone chooseStartingHand(List<PlayerZone> zones) {
-        return delegate.chooseStartingHand(zones);
+        return pickOne(zones);
     }
 
     @Override
     public Mana chooseManaFromPool(List<Mana> manaChoices) {
-        return delegate.chooseManaFromPool(manaChoices);
+        return pickOne(manaChoices);
     }
 
     @Override
     public String chooseSomeType(String kindOfType, SpellAbility sa, Collection<String> validTypes, boolean isOptional) {
-        return delegate.chooseSomeType(kindOfType, sa, validTypes, isOptional);
+        return (isOptional && randomBoolean()) ? null : pickOne(toList(validTypes));
     }
 
     @Override
     public String chooseSector(Card assignee, String ai, List<String> sectors) {
-        return delegate.chooseSector(assignee, ai, sectors);
+        return pickOne(sectors);
     }
 
     @Override
     public List<Card> chooseContraptionsToCrank(List<Card> contraptions) {
-        return delegate.chooseContraptionsToCrank(contraptions);
+        return pickN(contraptions, 1);
     }
 
     @Override
     public int chooseSprocket(Card assignee, List<Integer> sprockets) {
-        return delegate.chooseSprocket(assignee, sprockets);
+        Integer choice = pickOne(sprockets);
+        return choice != null ? choice : 0;
     }
 
     @Override
     public forge.game.PlanarDice choosePDRollToIgnore(List<forge.game.PlanarDice> rolls) {
-        return delegate.choosePDRollToIgnore(rolls);
+        return pickOne(rolls);
     }
 
     @Override
     public Integer chooseRollToIgnore(List<Integer> rolls) {
-        return delegate.chooseRollToIgnore(rolls);
+        return pickOne(rolls);
     }
 
     @Override
     public List<Integer> chooseDiceToReroll(List<Integer> rolls) {
-        return delegate.chooseDiceToReroll(rolls);
+        return new ArrayList<>();
     }
 
     @Override
     public Integer chooseRollToModify(List<Integer> rolls) {
-        return delegate.chooseRollToModify(rolls);
+        return pickOne(rolls);
     }
 
     @Override
     public RollDiceEffect.DieRollResult chooseRollToSwap(List<RollDiceEffect.DieRollResult> rolls) {
-        return delegate.chooseRollToSwap(rolls);
+        return pickOne(rolls);
     }
 
     @Override
     public String chooseRollSwapValue(List<String> swapChoices, Integer currentResult, int power, int toughness) {
-        return delegate.chooseRollSwapValue(swapChoices, currentResult, power, toughness);
+        return pickOne(swapChoices);
     }
 
     @Override
     public Object vote(SpellAbility sa, String prompt, List<Object> options, ListMultimap<Object, Player> votes, Player forPlayer, boolean optional) {
-        return delegate.vote(sa, prompt, options, votes, forPlayer, optional);
+        return (optional && randomBoolean()) ? null : pickOne(options);
     }
 
     @Override
     public CardCollectionView tuckCardsViaMulligan(CardCollectionView hand, int cardsToReturn) {
-        return delegate.tuckCardsViaMulligan(hand, cardsToReturn);
+        return new CardCollection(pickN(hand, cardsToReturn));
     }
 
     @Override
@@ -522,201 +579,209 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public boolean playChosenSpellAbility(SpellAbility sa) {
-        return delegate.playChosenSpellAbility(sa);
+        return safeDelegate(() -> delegate.playChosenSpellAbility(sa), false);
     }
 
     @Override
     public List<AbilitySub> chooseModeForAbility(SpellAbility sa, List<AbilitySub> possible, int min, int num, boolean allowRepeat) {
-        return delegate.chooseModeForAbility(sa, possible, min, num, allowRepeat);
+        return pickN(possible, num);
     }
 
     @Override
     public int chooseNumberForCostReduction(SpellAbility sa, int min, int max) {
-        return delegate.chooseNumberForCostReduction(sa, min, max);
+        return min;
     }
 
     @Override
     public int chooseNumberForKeywordCost(SpellAbility sa, Cost cost, KeywordInterface keyword, String prompt, int max) {
-        return delegate.chooseNumberForKeywordCost(sa, cost, keyword, prompt, max);
+        return 0;
     }
 
     @Override
     public int chooseNumber(SpellAbility sa, String title, int min, int max) {
-        return delegate.chooseNumber(sa, title, min, max);
+        return min + random.nextInt(Math.max(max - min + 1, 1));
     }
 
     @Override
     public int chooseNumber(SpellAbility sa, String title, List<Integer> values, Player relatedPlayer) {
-        return delegate.chooseNumber(sa, title, values, relatedPlayer);
+        Integer choice = pickOne(values);
+        return choice != null ? choice : 0;
     }
 
     @Override
     public boolean chooseBinary(SpellAbility sa, String question, BinaryChoiceType kindOfChoice, Boolean defaultChoice) {
-        return delegate.chooseBinary(sa, question, kindOfChoice, defaultChoice);
+        return randomBoolean();
     }
 
     @Override
     public boolean chooseFlipResult(SpellAbility sa, Player flipper, boolean call) {
-        return delegate.chooseFlipResult(sa, flipper, call);
+        return randomBoolean();
     }
 
     @Override
     public byte chooseColor(String message, SpellAbility sa, ColorSet colors) {
-        return delegate.chooseColor(message, sa, colors);
+        forge.card.MagicColor.Color choice = pickOne(new ArrayList<>(colors.toEnumSet()));
+        return choice != null ? choice.getColorMask() : 0;
     }
 
     @Override
     public byte chooseColorAllowColorless(String message, Card c, ColorSet colors) {
-        return delegate.chooseColorAllowColorless(message, c, colors);
+        return chooseColor(message, null, colors);
     }
 
     @Override
     public ColorSet chooseColors(String message, SpellAbility sa, int min, int max, ColorSet options) {
-        return delegate.chooseColors(message, sa, min, max, options);
+        List<forge.card.MagicColor.Color> picked = pickN(options.toEnumSet(), min);
+        return ColorSet.fromEnums(picked);
     }
 
     @Override
     public ICardFace chooseSingleCardFace(SpellAbility sa, String message, Predicate<ICardFace> cpp, String name) {
-        return delegate.chooseSingleCardFace(sa, message, cpp, name);
+        return null;
     }
 
     @Override
     public ICardFace chooseSingleCardFace(SpellAbility sa, List<ICardFace> faces, String message) {
-        return delegate.chooseSingleCardFace(sa, faces, message);
+        return pickOne(faces);
     }
 
     @Override
     public CardState chooseSingleCardState(SpellAbility sa, List<CardState> states, String message, Map<String, Object> params) {
-        return delegate.chooseSingleCardState(sa, states, message, params);
+        return pickOne(states);
     }
 
     @Override
     public boolean chooseCardsPile(SpellAbility sa, CardCollectionView pile1, CardCollectionView pile2, String faceUp) {
-        return delegate.chooseCardsPile(sa, pile1, pile2, faceUp);
+        return randomBoolean();
     }
 
     @Override
     public forge.game.card.CounterType chooseCounterType(List<forge.game.card.CounterType> options, SpellAbility sa, String prompt, Map<String, Object> params) {
-        return delegate.chooseCounterType(options, sa, prompt, params);
+        return pickOne(options);
     }
 
     @Override
     public String chooseKeywordForPump(List<String> options, SpellAbility sa, String prompt, Card tgtCard) {
-        return delegate.chooseKeywordForPump(options, sa, prompt, tgtCard);
+        return pickOne(options);
     }
 
     @Override
     public boolean confirmPayment(CostPart costPart, String string, SpellAbility sa) {
-        return delegate.confirmPayment(costPart, string, sa);
+        return randomBoolean();
     }
 
     @Override
     public ReplacementEffect chooseSingleReplacementEffect(List<ReplacementEffect> possibleReplacers) {
-        return delegate.chooseSingleReplacementEffect(possibleReplacers);
+        return pickOne(possibleReplacers);
     }
 
     @Override
     public StaticAbility chooseSingleStaticAbility(List<StaticAbility> possibleReplacers) {
-        return delegate.chooseSingleStaticAbility(possibleReplacers);
+        return pickOne(possibleReplacers);
     }
 
     @Override
     public String chooseProtectionType(SpellAbility sa, List<String> choices) {
-        return delegate.chooseProtectionType(sa, choices);
+        return pickOne(choices);
     }
 
     @Override
     public void revealAnte(String message, com.google.common.collect.Multimap<Player, PaperCard> removedAnteCards) {
-        delegate.revealAnte(message, removedAnteCards);
+        // no-op
     }
 
     @Override
     public void revealAISkipCards(String message, Map<Player, Map<DeckSection, List<? extends PaperCard>>> deckCards) {
-        delegate.revealAISkipCards(message, deckCards);
+        // no-op
     }
 
     @Override
     public void revealUnsupported(Map<Player, List<PaperCard>> unsupported) {
-        delegate.revealUnsupported(unsupported);
+        // no-op
     }
 
     @Override
     public List<forge.game.spellability.OptionalCostValue> chooseOptionalCosts(SpellAbility choosen, List<forge.game.spellability.OptionalCostValue> optionalCostValues) {
-        return delegate.chooseOptionalCosts(choosen, optionalCostValues);
+        return new ArrayList<>();
     }
 
     @Override
     public List<CostPart> orderCosts(List<CostPart> costs) {
-        return delegate.orderCosts(costs);
+        return costs;
     }
 
     @Override
     public boolean payCostToPreventEffect(Cost cost, SpellAbility sa, boolean alreadyPaid, FCollectionView<Player> allPayers) {
-        return delegate.payCostToPreventEffect(cost, sa, alreadyPaid, allPayers);
+        return false;
     }
 
     @Override
     public boolean payCostDuringRoll(Cost cost, SpellAbility sa) {
-        return delegate.payCostDuringRoll(cost, sa);
+        return false;
     }
 
     @Override
     public boolean payCombatCost(Card card, Cost cost, SpellAbility sa, String prompt) {
-        return delegate.payCombatCost(card, cost, sa, prompt);
+        return false;
     }
+
+    // ---- Mana/cost payment: no headless-safe non-AI implementation exists
+    // yet (see class comment), so this stays on the embedded delegate,
+    // guarded so a failure here can't take down the whole game thread. ----
 
     @Override
     public boolean payManaCost(ManaCost toPay, CostPartMana costPartMana, SpellAbility sa, String prompt, ManaConversionMatrix matrix, boolean effect) {
-        return delegate.payManaCost(toPay, costPartMana, sa, prompt, matrix, effect);
+        return safeDelegate(() -> delegate.payManaCost(toPay, costPartMana, sa, prompt, matrix, effect), false);
     }
 
     @Override
     public boolean applyManaToCost(ManaCostBeingPaid toPay, SpellAbility ability, String prompt, ManaConversionMatrix matrix, boolean effect) {
-        return delegate.applyManaToCost(toPay, ability, prompt, matrix, effect);
-    }
-
-    @Override
-    public CardCollectionView chooseCardsForCost(CardCollectionView optionList, SpellAbility sa, CostPartWithList cpl, int amount, boolean isOptional, String prompt) {
-        return delegate.chooseCardsForCost(optionList, sa, cpl, amount, isOptional, prompt);
+        return safeDelegate(() -> delegate.applyManaToCost(toPay, ability, prompt, matrix, effect), false);
     }
 
     @Override
     public CostDecisionMakerBase getCostDecisionMaker(Player player, SpellAbility ability, boolean effect, String prompt) {
-        return delegate.getCostDecisionMaker(player, ability, effect, prompt);
+        return safeDelegate(() -> delegate.getCostDecisionMaker(player, ability, effect, prompt), null);
+    }
+
+    @Override
+    public CardCollectionView chooseCardsForCost(CardCollectionView optionList, SpellAbility sa, CostPartWithList cpl, int amount, boolean isOptional, String prompt) {
+        return new CardCollection(pickN(optionList, isOptional ? 0 : amount));
     }
 
     @Override
     public String chooseCardName(SpellAbility sa, Predicate<ICardFace> cpp, String valid, String message) {
-        return delegate.chooseCardName(sa, cpp, valid, message);
+        return null;
     }
 
     @Override
     public String chooseCardName(SpellAbility sa, List<ICardFace> faces, String message) {
-        return delegate.chooseCardName(sa, faces, message);
+        ICardFace choice = pickOne(faces);
+        return choice != null ? choice.getName() : null;
     }
 
     @Override
     public Card chooseSingleCardForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility sa, CardCollection fetchList, DelayedReveal delayedReveal, String selectPrompt, boolean isOptional, Player decider) {
-        return delegate.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal, selectPrompt, isOptional, decider);
+        return (isOptional && randomBoolean()) ? null : pickOne(fetchList);
     }
 
     @Override
     public List<Card> chooseCardsForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility sa, CardCollection fetchList, int min, int max, DelayedReveal delayedReveal, String selectPrompt, Player decider) {
-        return delegate.chooseCardsForZoneChange(destination, origin, sa, fetchList, min, max, delayedReveal, selectPrompt, decider);
+        return pickN(fetchList, min);
     }
 
     @Override
     public void autoPassCancel() {
-        delegate.autoPassCancel();
+        // no-op
     }
 
     @Override
     public void awaitNextInput() {
-        delegate.awaitNextInput();
+        // no-op
     }
 
     @Override
     public void cancelAwaitNextInput() {
-        delegate.cancelAwaitNextInput();
+        // no-op
     }
 }
