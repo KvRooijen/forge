@@ -3,9 +3,8 @@ package forge.headless.server;
 import forge.CardStorageReader;
 import forge.ImageKeys;
 import forge.StaticData;
-import forge.deck.CardPool;
 import forge.deck.Deck;
-import forge.deck.DeckSection;
+import forge.deck.io.DeckSerializer;
 import forge.game.Game;
 import forge.game.GameRules;
 import forge.game.GameType;
@@ -14,13 +13,11 @@ import forge.game.player.RegisteredPlayer;
 import forge.headless.protocol.DecisionResponse;
 import forge.headless.protocol.HttpChannel;
 import forge.headless.protocol.WebSocketChannel;
-import forge.item.PaperCard;
 import forge.util.Lang;
 import forge.util.Localizer;
 import io.javalin.Javalin;
 
 import java.io.File;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -29,12 +26,14 @@ import java.util.concurrent.Executors;
 /**
  * Entry point for the headless engine server: one WebSocket endpoint for
  * the human seat, one outbound HTTP channel per AI seat pointed at the
- * Python ai-bridge. Decks are still hardcoded; real deck import is
- * Phase 5. This is a 3-player Commander pod: one human seat, two AI seats.
+ * Python ai-bridge. Seats/decks are still hardcoded; a real lobby API is
+ * Phase 4 frontend work. This is a 4-player Commander pod using real
+ * precon decklists shipped with Forge itself.
  */
 public class GameServer {
 
     private static final Map<String, WebSocketChannel> channelsBySession = new ConcurrentHashMap<>();
+    private static File resDir;
 
     public static void main(String[] args) {
         bootstrapForgeStatics();
@@ -65,15 +64,21 @@ public class GameServer {
 
     private static void runGame(WebSocketChannel humanChannel, String aiBridgeUrl) {
         try {
-            RegisteredPlayer human = RegisteredPlayer.forCommander(buildKrenkoGoblinsDeck("Human's Deck"))
-                    .setPlayer(new LobbyPlayerRemote("Human", humanChannel));
-            RegisteredPlayer ai1 = RegisteredPlayer.forCommander(buildKrenkoGoblinsDeck("AI 1's Deck"))
-                    .setPlayer(new LobbyPlayerRemote("AI 1", new HttpChannel(aiBridgeUrl)));
-            RegisteredPlayer ai2 = RegisteredPlayer.forCommander(buildKrenkoGoblinsDeck("AI 2's Deck"))
-                    .setPlayer(new LobbyPlayerRemote("AI 2", new HttpChannel(aiBridgeUrl)));
+            RegisteredPlayer human = RegisteredPlayer.forCommander(
+                    loadPreconDeck("Subjective Reality [C18] [2018].dck"))
+                    .setPlayer(new LobbyPlayerRemote("Human (Aminatou)", humanChannel));
+            RegisteredPlayer ai1 = RegisteredPlayer.forCommander(
+                    loadPreconDeck("Veloci-Ramp-Tor [LCC] [2023].dck"))
+                    .setPlayer(new LobbyPlayerRemote("AI (Pantlaza)", new HttpChannel(aiBridgeUrl)));
+            RegisteredPlayer ai2 = RegisteredPlayer.forCommander(
+                    loadPreconDeck("Explorers of the Deep [LCC] [2023].dck"))
+                    .setPlayer(new LobbyPlayerRemote("AI (Hakbal)", new HttpChannel(aiBridgeUrl)));
+            RegisteredPlayer ai3 = RegisteredPlayer.forCommander(
+                    loadPreconDeck("Temur Roar [TDC] [2025].dck"))
+                    .setPlayer(new LobbyPlayerRemote("AI (Eshki)", new HttpChannel(aiBridgeUrl)));
 
             GameRules rules = new GameRules(GameType.Commander);
-            Match match = new Match(rules, List.of(human, ai1, ai2), "Playtest");
+            Match match = new Match(rules, List.of(human, ai1, ai2, ai3), "Playtest");
             Game game = match.createGame();
             match.startGame(game);
 
@@ -84,46 +89,17 @@ public class GameServer {
         }
     }
 
-    /**
-     * Resolves a commander + main deck list against Forge's card database.
-     * Throws immediately with the offending name if a card can't be found -
-     * this is the same resolution step real decklist import will need.
-     */
-    private static Deck resolveDeck(String name, String commanderName, List<String> mainCardNames) {
-        Deck deck = new Deck(name);
-        deck.getOrCreate(DeckSection.Commander).add(resolveCard(commanderName));
-        CardPool main = deck.getMain();
-        for (String cardName : mainCardNames) {
-            main.add(resolveCard(cardName));
+    private static Deck loadPreconDeck(String fileName) {
+        File deckFile = new File(resDir, "quest/commanderprecons/" + fileName);
+        Deck deck = DeckSerializer.fromFile(deckFile);
+        if (deck == null) {
+            throw new IllegalStateException("Could not load precon deck: " + deckFile.getAbsolutePath());
         }
-        return deck;
-    }
-
-    private static PaperCard resolveCard(String name) {
-        PaperCard card = StaticData.instance().getCommonCards().getCard(name);
-        if (card == null) {
-            throw new IllegalArgumentException("Unknown card: " + name);
-        }
-        return card;
-    }
-
-    private static Deck buildKrenkoGoblinsDeck(String name) {
-        List<String> spells = new ArrayList<>(List.of(
-                "Goblin Bushwhacker", "Goblin Warchief", "Goblin Matron", "Goblin Recruiter",
-                "Goblin Piledriver", "Mogg War Marshal", "Hellrider", "Fanatical Firebrand",
-                "Reckless One", "War Horn", "Lightning Strike", "Fireblast", "Chain Lightning",
-                "Browbeat", "Wheel of Fortune", "Burning of Xinye", "Rite of Flame", "Dragon Fodder",
-                "Krenko, Tin Street Kingpin", "Mardu Strike Leader", "Skirk Commando",
-                "Boggart Shenanigans", "Goblin Sharpshooter", "Goblin Lackey", "Lightning Greaves",
-                "Skullclamp", "Goblin Chieftain", "Goblin King", "Skirk Prospector", "Mogg Fanatic",
-                "Lightning Bolt", "Sol Ring", "Arcane Signet", "Commander's Sphere", "Swiftfoot Boots"));
-        Deck deck = resolveDeck(name, "Krenko, Mob Boss", spells);
-        deck.getMain().add(resolveCard("Mountain"), 28);
         return deck;
     }
 
     private static void bootstrapForgeStatics() {
-        File resDir = resolveResDir();
+        resDir = resolveResDir();
         Localizer.getInstance().initialize("en-US", new File(resDir, "languages").getAbsolutePath());
         Lang.createInstance("en-US");
         ImageKeys.initializeDirs("", java.util.Collections.emptyMap(), "", "", "", "", "", "", "");
