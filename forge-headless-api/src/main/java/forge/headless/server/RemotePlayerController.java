@@ -304,7 +304,7 @@ public class RemotePlayerController extends PlayerController {
         for (Card c : attacker.getCreaturesInPlay()) {
             if (CombatUtil.canAttack(c, defender)) {
                 candidates.add(c);
-                options.add(new DecisionRequest.Option(String.valueOf(c.getId()), c.getName()));
+                options.add(new DecisionRequest.Option(String.valueOf(c.getId()), c.getName(), String.valueOf(c.getId())));
             }
         }
         if (candidates.isEmpty()) {
@@ -674,13 +674,18 @@ public class RemotePlayerController extends PlayerController {
         for (Card c : player.getCardsIn(ZoneType.Battlefield)) {
             legalPlays.addAll(c.getAllPossibleAbilities(player, true));
         }
+        for (Card c : player.getCardsIn(ZoneType.Command)) {
+            legalPlays.addAll(c.getAllPossibleAbilities(player, true));
+        }
         if (legalPlays.isEmpty()) {
             return null;
         }
 
         List<DecisionRequest.Option> options = new ArrayList<>();
         for (int i = 0; i < legalPlays.size(); i++) {
-            options.add(new DecisionRequest.Option(String.valueOf(i), legalPlays.get(i).toString()));
+            SpellAbility sa = legalPlays.get(i);
+            String cardId = sa.getHostCard() != null ? String.valueOf(sa.getHostCard().getId()) : null;
+            options.add(new DecisionRequest.Option(String.valueOf(i), sa.toString(), cardId));
         }
         DecisionResponse resp = ask("CHOOSE_SPELL_ABILITY", "Choose a play, or none to pass priority", options);
         if (resp.chosenIds == null || resp.chosenIds.isEmpty()) {

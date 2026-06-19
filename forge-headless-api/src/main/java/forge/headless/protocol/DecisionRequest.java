@@ -34,12 +34,19 @@ public class DecisionRequest {
     public static class Option {
         public String id;
         public String label;
+        public String cardId;
 
         public Option() { }
 
         public Option(String id, String label) {
             this.id = id;
             this.label = label;
+        }
+
+        public Option(String id, String label, String cardId) {
+            this.id = id;
+            this.label = label;
+            this.cardId = cardId;
         }
     }
 }
