@@ -161,11 +161,11 @@ public class RemotePlayerController extends PlayerController {
         return random.nextBoolean();
     }
 
-    private <T> T safeDelegate(java.util.function.Supplier<T> call, T fallback) {
+    private <T> T safely(java.util.function.Supplier<T> call, T fallback) {
         try {
             return call.get();
         } catch (RuntimeException e) {
-            System.err.println("[RemotePlayerController] cost/mana delegate call failed for "
+            System.err.println("[RemotePlayerController] call failed for "
                     + player.getName() + ", falling back: " + e);
             return fallback;
         }
@@ -331,7 +331,7 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public void playSpellAbilityNoStack(SpellAbility effectSA, boolean mayChoseNewTargets) {
-        safeDelegate(() -> {
+        safely(() -> {
             delegate.playSpellAbilityNoStack(effectSA, mayChoseNewTargets);
             return null;
         }, null);
@@ -344,7 +344,7 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public void orderAndPlaySimultaneousSa(List<SpellAbility> activePlayerSAs) {
-        safeDelegate(() -> {
+        safely(() -> {
             delegate.orderAndPlaySimultaneousSa(activePlayerSAs);
             return null;
         }, null);
@@ -372,17 +372,17 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public Map<Card, Integer> assignCombatDamage(Card attacker, CardCollectionView blockers, CardCollectionView remaining, int damageDealt, GameEntity defender, boolean overrideOrder) {
-        return safeDelegate(() -> delegate.assignCombatDamage(attacker, blockers, remaining, damageDealt, defender, overrideOrder), new java.util.HashMap<>());
+        return safely(() -> delegate.assignCombatDamage(attacker, blockers, remaining, damageDealt, defender, overrideOrder), new java.util.HashMap<>());
     }
 
     @Override
     public Map<GameEntity, Integer> divideShield(Card effectSource, Map<GameEntity, Integer> affected, int shieldAmount) {
-        return safeDelegate(() -> delegate.divideShield(effectSource, affected, shieldAmount), new java.util.HashMap<>());
+        return safely(() -> delegate.divideShield(effectSource, affected, shieldAmount), new java.util.HashMap<>());
     }
 
     @Override
     public Map<Byte, Integer> specifyManaCombo(SpellAbility sa, ColorSet colorSet, int manaAmount, boolean different) {
-        return safeDelegate(() -> delegate.specifyManaCombo(sa, colorSet, manaAmount, different), new java.util.HashMap<>());
+        return safely(() -> delegate.specifyManaCombo(sa, colorSet, manaAmount, different), new java.util.HashMap<>());
     }
 
     @Override
@@ -402,12 +402,12 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public TargetChoices chooseNewTargetsFor(SpellAbility ability, Predicate<GameObject> filter, boolean optional) {
-        return safeDelegate(() -> delegate.chooseNewTargetsFor(ability, filter, optional), null);
+        return safely(() -> delegate.chooseNewTargetsFor(ability, filter, optional), null);
     }
 
     @Override
     public boolean chooseTargetsFor(SpellAbility currentAbility) {
-        return safeDelegate(() -> delegate.chooseTargetsFor(currentAbility), false);
+        return safely(() -> delegate.chooseTargetsFor(currentAbility), false);
     }
 
     @Override
@@ -487,7 +487,7 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public void declareBlockers(Player defender, Combat combat) {
-        safeDelegate(() -> {
+        safely(() -> {
             delegate.declareBlockers(defender, combat);
             return null;
         }, null);
@@ -692,7 +692,13 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public boolean playChosenSpellAbility(SpellAbility sa) {
-        boolean result = safeDelegate(() -> delegate.playChosenSpellAbility(sa), false);
+        // forge.game.player.PlaySpellAbility is the shared engine-level cast
+        // routine (not AI- or GUI-specific) - it moves the spell to the
+        // stack, attempts payment via our own payManaCost/applyManaToCost,
+        // and properly rolls back (off the stack, mana refunded) if payment
+        // fails. The AI delegate's own cast path doesn't go through this,
+        // which is how an unpayable spell could get stuck on the stack.
+        boolean result = safely(() -> forge.game.player.PlaySpellAbility.playSpellAbility(this, player, sa), false);
         pushSpectatorUpdate();
         return result;
     }
@@ -846,17 +852,17 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public boolean payManaCost(ManaCost toPay, CostPartMana costPartMana, SpellAbility sa, String prompt, ManaConversionMatrix matrix, boolean effect) {
-        return safeDelegate(() -> delegate.payManaCost(toPay, costPartMana, sa, prompt, matrix, effect), false);
+        return safely(() -> delegate.payManaCost(toPay, costPartMana, sa, prompt, matrix, effect), false);
     }
 
     @Override
     public boolean applyManaToCost(ManaCostBeingPaid toPay, SpellAbility ability, String prompt, ManaConversionMatrix matrix, boolean effect) {
-        return safeDelegate(() -> delegate.applyManaToCost(toPay, ability, prompt, matrix, effect), false);
+        return safely(() -> delegate.applyManaToCost(toPay, ability, prompt, matrix, effect), false);
     }
 
     @Override
     public CostDecisionMakerBase getCostDecisionMaker(Player player, SpellAbility ability, boolean effect, String prompt) {
-        return safeDelegate(() -> delegate.getCostDecisionMaker(player, ability, effect, prompt), null);
+        return safely(() -> delegate.getCostDecisionMaker(player, ability, effect, prompt), null);
     }
 
     @Override
