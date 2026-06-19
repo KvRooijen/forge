@@ -1,5 +1,7 @@
 package forge.headless.server;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import forge.CardStorageReader;
 import forge.ImageKeys;
 import forge.StaticData;
@@ -18,8 +20,10 @@ import forge.util.Localizer;
 import io.javalin.Javalin;
 
 import java.io.File;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 
@@ -33,6 +37,7 @@ import java.util.concurrent.Executors;
 public class GameServer {
 
     private static final Map<String, WebSocketChannel> channelsBySession = new ConcurrentHashMap<>();
+    private static final ObjectMapper MAPPER = new ObjectMapper();
     private static File resDir;
 
     public static void main(String[] args) {
@@ -55,8 +60,16 @@ public class GameServer {
             });
             ws.onMessage(ctx -> {
                 WebSocketChannel channel = channelsBySession.get(ctx.sessionId());
-                if (channel != null) {
-                    channel.onResponse(ctx.messageAsClass(DecisionResponse.class));
+                if (channel == null) {
+                    return;
+                }
+                JsonNode node = MAPPER.readTree(ctx.message());
+                if (node.has("stopPhases")) {
+                    Set<String> stopPhases = new HashSet<>();
+                    node.get("stopPhases").forEach(n -> stopPhases.add(n.asText()));
+                    channel.applyPhasePrefs(stopPhases);
+                } else {
+                    channel.onResponse(MAPPER.treeToValue(node, DecisionResponse.class));
                 }
             });
             ws.onClose(ctx -> channelsBySession.remove(ctx.sessionId()));

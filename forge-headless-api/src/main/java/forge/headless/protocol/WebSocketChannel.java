@@ -3,9 +3,11 @@ package forge.headless.protocol;
 import io.javalin.websocket.WsContext;
 
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 /**
  * Backs a human seat. The engine thread blocks in ask() until the browser
@@ -16,6 +18,7 @@ public class WebSocketChannel implements RemoteChannel {
 
     private final WsContext ctx;
     private final Map<String, CompletableFuture<DecisionResponse>> pending = new ConcurrentHashMap<>();
+    private Consumer<Set<String>> phasePrefsListener;
 
     public WebSocketChannel(WsContext ctx) {
         this.ctx = ctx;
@@ -25,6 +28,17 @@ public class WebSocketChannel implements RemoteChannel {
         CompletableFuture<DecisionResponse> future = pending.remove(response.id);
         if (future != null) {
             future.complete(response);
+        }
+    }
+
+    /** Registered by whichever RemotePlayerController actually owns this channel as its decision channel. */
+    public void onPhasePrefsChanged(Consumer<Set<String>> listener) {
+        this.phasePrefsListener = listener;
+    }
+
+    public void applyPhasePrefs(Set<String> stopPhases) {
+        if (phasePrefsListener != null) {
+            phasePrefsListener.accept(stopPhases);
         }
     }
 

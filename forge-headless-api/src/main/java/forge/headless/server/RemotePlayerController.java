@@ -81,10 +81,32 @@ import java.util.function.Predicate;
  */
 public class RemotePlayerController extends PlayerController {
 
+    /** Log entry types worth showing as "real actions" - excludes PHASE/TURN noise. */
+    private static final java.util.Set<forge.game.GameLogEntryType> ACTION_LOG_TYPES = java.util.EnumSet.of(
+            forge.game.GameLogEntryType.DAMAGE, forge.game.GameLogEntryType.LIFE,
+            forge.game.GameLogEntryType.ZONE_CHANGE, forge.game.GameLogEntryType.LAND,
+            forge.game.GameLogEntryType.DISCARD, forge.game.GameLogEntryType.COMBAT,
+            forge.game.GameLogEntryType.STACK_ADD, forge.game.GameLogEntryType.STACK_RESOLVE,
+            forge.game.GameLogEntryType.MANA, forge.game.GameLogEntryType.MULLIGAN,
+            forge.game.GameLogEntryType.INFORMATION, forge.game.GameLogEntryType.EFFECT_REPLACED,
+            forge.game.GameLogEntryType.GAME_OUTCOME);
+
     private final RemoteChannel channel;
     private final forge.headless.protocol.WebSocketChannel spectatorChannel;
     private final PlayerControllerAi delegate;
     private final java.util.Random random = new java.util.Random();
+
+    /**
+     * Phases this seat wants to actually stop and be asked at - everything
+     * else gets silently auto-passed when there's nothing forced to react
+     * to (stack empty), mirroring Forge's per-player "stop at this phase"
+     * toggles. Defaults to the phases most players actually care about.
+     */
+    private final EnumSet<forge.game.phase.PhaseType> stopPhases = EnumSet.of(
+            forge.game.phase.PhaseType.MAIN1,
+            forge.game.phase.PhaseType.COMBAT_DECLARE_ATTACKERS,
+            forge.game.phase.PhaseType.COMBAT_DECLARE_BLOCKERS,
+            forge.game.phase.PhaseType.MAIN2);
 
     public RemotePlayerController(Game game, Player p, LobbyPlayer lp, RemoteChannel channel,
             forge.headless.protocol.WebSocketChannel spectatorChannel) {
@@ -93,6 +115,20 @@ public class RemotePlayerController extends PlayerController {
         this.spectatorChannel = spectatorChannel;
         this.delegate = new PlayerControllerAi(game, p,
                 new LobbyPlayerAi("fallback-ai-for-" + lp.getName(), EnumSet.noneOf(AIOption.class)));
+        if (channel instanceof forge.headless.protocol.WebSocketChannel wsChannel) {
+            wsChannel.onPhasePrefsChanged(this::applyStopPhases);
+        }
+    }
+
+    private void applyStopPhases(java.util.Set<String> phaseNames) {
+        stopPhases.clear();
+        for (String name : phaseNames) {
+            try {
+                stopPhases.add(forge.game.phase.PhaseType.valueOf(name));
+            } catch (IllegalArgumentException ignored) {
+                // unknown phase name from the client - skip it
+            }
+        }
     }
 
     // ---- Generic non-AI fallback helpers ----
@@ -201,18 +237,27 @@ public class RemotePlayerController extends PlayerController {
                     toCardViews(p.getCardsIn(ZoneType.Command))));
         }
         List<String> log = new ArrayList<>();
-        for (forge.game.GameLogEntry entry : g.getGameLog().getLogEntries(null)) {
+        for (forge.game.GameLogEntry entry : g.getGameLog().getLogEntriesForTypes(ACTION_LOG_TYPES)) {
             log.add(entry.toString());
         }
         int logStart = Math.max(0, log.size() - 30);
         forge.game.phase.PhaseType phase = g.getPhaseHandler().getPhase();
+
+        List<String> viewerStopPhases = new ArrayList<>();
+        if (viewer.getController() instanceof RemotePlayerController viewerController) {
+            for (forge.game.phase.PhaseType pt : viewerController.stopPhases) {
+                viewerStopPhases.add(pt.name());
+            }
+        }
+
         return new GameStateView(
                 g.getPhaseHandler().getTurn(),
-                phase != null ? phase.nameForUi : "",
+                phase != null ? phase.name() : "",
                 active != null ? active.getName() : null,
                 playerViews,
                 toCardViews(g.getStackZone().getCards()),
-                log.subList(logStart, log.size()));
+                log.subList(logStart, log.size()),
+                viewerStopPhases);
     }
 
     private List<CardStateView> toCardViews(Iterable<Card> cards) {
@@ -618,6 +663,10 @@ public class RemotePlayerController extends PlayerController {
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
         pushSpectatorUpdate();
+        Game g = player.getGame();
+        if (g.getStackZone().isEmpty() && !stopPhases.contains(g.getPhaseHandler().getPhase())) {
+            return null;
+        }
         List<SpellAbility> legalPlays = new ArrayList<>();
         for (Card c : player.getCardsIn(ZoneType.Hand)) {
             legalPlays.addAll(c.getAllPossibleAbilities(player, true));
