@@ -97,17 +97,30 @@ public class RemotePlayerController extends PlayerController {
     private final java.util.Random random = new java.util.Random();
 
     /**
-     * Phases this seat wants to actually stop and be asked at - everything
-     * else gets silently auto-passed when there's nothing forced to react
-     * to (stack empty), mirroring Forge's per-player "stop at this phase"
-     * toggles. Defaults to the phases most players actually care about.
+     * Phases this seat wants to actually stop and be asked at, keyed by
+     * WHICH PLAYER's turn it is - everything else gets silently auto-passed
+     * when there's nothing forced to react to (stack empty). This mirrors
+     * real Forge: CMatchUI.isUiSetToSkipPhase(playerTurn, phase) looks up
+     * the phase indicator on the board of whoever's turn it currently is,
+     * not a single shared toggle set - so "stop during declare attackers
+     * on MY turn" and "stop during declare attackers on THEIR turn" are
+     * genuinely independent preferences. Defaults to the same set for every
+     * seat until the human overrides one specifically.
      */
-    private final EnumSet<forge.game.phase.PhaseType> stopPhases = EnumSet.of(
-            forge.game.phase.PhaseType.UPKEEP,
-            forge.game.phase.PhaseType.MAIN1,
-            forge.game.phase.PhaseType.COMBAT_DECLARE_ATTACKERS,
-            forge.game.phase.PhaseType.COMBAT_DECLARE_BLOCKERS,
-            forge.game.phase.PhaseType.MAIN2);
+    private final Map<String, EnumSet<forge.game.phase.PhaseType>> stopPhasesByTurnPlayer = new java.util.HashMap<>();
+
+    private static EnumSet<forge.game.phase.PhaseType> defaultStopPhases() {
+        return EnumSet.of(
+                forge.game.phase.PhaseType.UPKEEP,
+                forge.game.phase.PhaseType.MAIN1,
+                forge.game.phase.PhaseType.COMBAT_DECLARE_ATTACKERS,
+                forge.game.phase.PhaseType.COMBAT_DECLARE_BLOCKERS,
+                forge.game.phase.PhaseType.MAIN2);
+    }
+
+    private EnumSet<forge.game.phase.PhaseType> stopPhasesFor(Player turnPlayer) {
+        return stopPhasesByTurnPlayer.computeIfAbsent(turnPlayer.getName(), n -> defaultStopPhases());
+    }
 
     /**
      * Game.getPhaseHandler().getTurn() value (the GLOBAL turn counter,
@@ -137,15 +150,16 @@ public class RemotePlayerController extends PlayerController {
         }
     }
 
-    private void applyStopPhases(java.util.Set<String> phaseNames) {
-        stopPhases.clear();
+    private void applyStopPhases(String forPlayerName, java.util.Set<String> phaseNames) {
+        EnumSet<forge.game.phase.PhaseType> set = EnumSet.noneOf(forge.game.phase.PhaseType.class);
         for (String name : phaseNames) {
             try {
-                stopPhases.add(forge.game.phase.PhaseType.valueOf(name));
+                set.add(forge.game.phase.PhaseType.valueOf(name));
             } catch (IllegalArgumentException ignored) {
                 // unknown phase name from the client - skip it
             }
         }
+        stopPhasesByTurnPlayer.put(forPlayerName, set);
     }
 
     // ---- Generic non-AI fallback helpers ----
@@ -337,7 +351,14 @@ public class RemotePlayerController extends PlayerController {
         Game g = player.getGame();
         List<PlayerStateView> playerViews = new ArrayList<>();
         Player active = g.getPhaseHandler().getPlayerTurn();
+        RemotePlayerController viewerController = viewer.getController() instanceof RemotePlayerController rpc ? rpc : null;
         for (Player p : g.getPlayers()) {
+            List<String> stopAtPhasesForP = new ArrayList<>();
+            if (viewerController != null) {
+                for (forge.game.phase.PhaseType pt : viewerController.stopPhasesFor(p)) {
+                    stopAtPhasesForP.add(pt.name());
+                }
+            }
             playerViews.add(new PlayerStateView(
                     p.getName(),
                     p.getLife(),
@@ -346,7 +367,8 @@ public class RemotePlayerController extends PlayerController {
                     p.getCardsIn(ZoneType.Hand).size(),
                     p == viewer ? toCardViews(p.getCardsIn(ZoneType.Hand)) : null,
                     toCardViews(p.getCardsIn(ZoneType.Battlefield)),
-                    toCardViews(p.getCardsIn(ZoneType.Command))));
+                    toCardViews(p.getCardsIn(ZoneType.Command)),
+                    stopAtPhasesForP));
         }
         List<String> log = new ArrayList<>();
         for (forge.game.GameLogEntry entry : g.getGameLog().getLogEntriesForTypes(ACTION_LOG_TYPES)) {
@@ -354,13 +376,6 @@ public class RemotePlayerController extends PlayerController {
         }
         int logStart = Math.max(0, log.size() - 30);
         forge.game.phase.PhaseType phase = g.getPhaseHandler().getPhase();
-
-        List<String> viewerStopPhases = new ArrayList<>();
-        if (viewer.getController() instanceof RemotePlayerController viewerController) {
-            for (forge.game.phase.PhaseType pt : viewerController.stopPhases) {
-                viewerStopPhases.add(pt.name());
-            }
-        }
 
         return new GameStateView(
                 // Player.getTurn() is that player's own turn count (their
@@ -371,8 +386,7 @@ public class RemotePlayerController extends PlayerController {
                 active != null ? active.getName() : null,
                 playerViews,
                 toCardViews(g.getStackZone().getCards()),
-                log.subList(logStart, log.size()),
-                viewerStopPhases);
+                log.subList(logStart, log.size()));
     }
 
     private List<CardStateView> toCardViews(Iterable<Card> cards) {
@@ -476,7 +490,15 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public void playSpellAbilityNoStack(SpellAbility effectSA, boolean mayChoseNewTargets) {
-        withDelegateVoid(() -> delegate.playSpellAbilityNoStack(effectSA, mayChoseNewTargets));
+        // This is how mandatory triggers resolve (e.g. Aminatou's "at the
+        // beginning of your upkeep, surveil 2" - no cost, so no decider,
+        // so it skips confirmTrigger and goes straight here). Routing it
+        // through the embedded AI delegate (like playChosenSpellAbility's
+        // comment warns against) meant any interactive decision inside the
+        // trigger's resolution (arrangeForSurveil, confirmAction, etc.)
+        // got silently answered by forge-ai instead of asking the real
+        // controller - the trigger "worked" but the human was never asked.
+        safely(() -> forge.game.player.PlaySpellAbility.playSpellAbilityNoStack(this, player, effectSA, !mayChoseNewTargets), false);
     }
 
     @Override
@@ -633,7 +655,36 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public void declareBlockers(Player defender, Combat combat) {
-        withDelegateVoid(() -> delegate.declareBlockers(defender, combat));
+        // The AI seat keeps using forge-ai's own (already decent) block
+        // logic - ai-bridge's heuristics don't cover blocking yet, and
+        // there's no human on that end to ask. The human seat gets asked
+        // for real: this previously always fell through to the embedded
+        // delegate for every seat, including the human's own defense,
+        // which meant blocking was never actually interactive.
+        if (!(channel instanceof forge.headless.protocol.WebSocketChannel)) {
+            withDelegateVoid(() -> delegate.declareBlockers(defender, combat));
+            pushSpectatorUpdate();
+            return;
+        }
+        CardCollection attackers = combat.getAttackersOf(defender);
+        java.util.Set<Card> alreadyBlocking = new java.util.HashSet<>();
+        for (Card attacker : attackers) {
+            List<Card> candidates = new ArrayList<>();
+            for (Card blocker : defender.getCreaturesInPlay()) {
+                if (!alreadyBlocking.contains(blocker) && CombatUtil.canBlock(attacker, blocker, combat)) {
+                    candidates.add(blocker);
+                }
+            }
+            if (candidates.isEmpty()) {
+                continue;
+            }
+            List<Card> chosen = chooseFromList("Declare blockers for " + attacker.getName() + " (attacking you)",
+                    candidates, 0, candidates.size(), Card::getName, c -> String.valueOf(c.getId()));
+            for (Card blocker : chosen) {
+                combat.addBlocker(attacker, blocker);
+                alreadyBlocking.add(blocker);
+            }
+        }
         pushSpectatorUpdate();
     }
 
@@ -845,7 +896,7 @@ public class RemotePlayerController extends PlayerController {
         if (autoPassEndTurnAt == g.getPhaseHandler().getTurn()) {
             return null;
         }
-        if (g.getStackZone().isEmpty() && !stopPhases.contains(g.getPhaseHandler().getPhase())) {
+        if (g.getStackZone().isEmpty() && !stopPhasesFor(g.getPhaseHandler().getPlayerTurn()).contains(g.getPhaseHandler().getPhase())) {
             return null;
         }
         List<SpellAbility> legalPlays = new ArrayList<>();

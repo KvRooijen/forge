@@ -67,7 +67,8 @@ public class GameServer {
                 if (node.has("stopPhases")) {
                     Set<String> stopPhases = new HashSet<>();
                     node.get("stopPhases").forEach(n -> stopPhases.add(n.asText()));
-                    channel.applyPhasePrefs(stopPhases);
+                    String forPlayer = node.has("forPlayer") ? node.get("forPlayer").asText() : null;
+                    channel.applyPhasePrefs(forPlayer, stopPhases);
                 } else {
                     channel.onResponse(MAPPER.treeToValue(node, DecisionResponse.class));
                 }
