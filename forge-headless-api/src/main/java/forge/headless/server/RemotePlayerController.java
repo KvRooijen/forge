@@ -103,20 +103,24 @@ public class RemotePlayerController extends PlayerController {
      * toggles. Defaults to the phases most players actually care about.
      */
     private final EnumSet<forge.game.phase.PhaseType> stopPhases = EnumSet.of(
+            forge.game.phase.PhaseType.UPKEEP,
             forge.game.phase.PhaseType.MAIN1,
             forge.game.phase.PhaseType.COMBAT_DECLARE_ATTACKERS,
             forge.game.phase.PhaseType.COMBAT_DECLARE_BLOCKERS,
             forge.game.phase.PhaseType.MAIN2);
 
     /**
-     * Player.getTurn() value (this player's own turn counter) for which
-     * "End Turn" was pressed - while it matches the current turn, every
-     * remaining priority window this turn auto-passes regardless of
-     * stopPhases, same idea as Forge's own End Turn button. Naturally
-     * stops applying once the player's turn counter advances, no reset
-     * needed. Doesn't affect mandatory decisions (declare attackers/
-     * blockers, paying for something already on the stack) - those go
-     * through separate controller methods that always ask.
+     * Game.getPhaseHandler().getTurn() value (the GLOBAL turn counter,
+     * shared by every player - not Player.getTurn(), which only counts
+     * this player's own turns and therefore never changes while it's an
+     * opponent's turn) for which "End Turn" was pressed. While it matches
+     * the current global turn, every remaining priority window this seat
+     * gets auto-passes regardless of stopPhases, same idea as Forge's own
+     * End Turn button. Naturally stops applying once the global turn
+     * advances, no reset needed. Doesn't affect mandatory decisions
+     * (declare attackers/blockers, paying for something already on the
+     * stack) - those go through separate controller methods that always
+     * ask.
      */
     private int autoPassEndTurnAt = -1;
     private static final String END_TURN_OPTION = "__END_TURN__";
@@ -256,8 +260,31 @@ public class RemotePlayerController extends PlayerController {
         return chosen;
     }
 
+    /**
+     * Only tags a cardId when the card is actually sitting in a zone the
+     * frontend renders (hand/battlefield/command zone) - otherwise the UI
+     * tries to make the player click a card that isn't drawn anywhere
+     * (library search results, scry/surveil candidates, top-of-library
+     * reorder, etc.), which looks like "nothing happens" when really the
+     * checklist just silently has zero clickable targets. Those cases
+     * fall back to the plain text checklist instead.
+     */
     private static String cardIdOf(Object o) {
-        return (o instanceof Card c) ? String.valueOf(c.getId()) : null;
+        if (!(o instanceof Card c)) {
+            return null;
+        }
+        forge.game.zone.Zone zone = c.getZone();
+        if (zone == null) {
+            return null;
+        }
+        switch (zone.getZoneType()) {
+            case Hand:
+            case Battlefield:
+            case Command:
+                return String.valueOf(c.getId());
+            default:
+                return null;
+        }
     }
 
     /**
@@ -785,7 +812,7 @@ public class RemotePlayerController extends PlayerController {
     public List<SpellAbility> chooseSpellAbilityToPlay() {
         pushSpectatorUpdate();
         Game g = player.getGame();
-        if (autoPassEndTurnAt == player.getTurn()) {
+        if (autoPassEndTurnAt == g.getPhaseHandler().getTurn()) {
             return null;
         }
         if (g.getStackZone().isEmpty() && !stopPhases.contains(g.getPhaseHandler().getPhase())) {
@@ -818,7 +845,7 @@ public class RemotePlayerController extends PlayerController {
         }
         String chosen = resp.chosenIds.get(0);
         if (chosen.equals(END_TURN_OPTION)) {
-            autoPassEndTurnAt = player.getTurn();
+            autoPassEndTurnAt = g.getPhaseHandler().getTurn();
             return null;
         }
         int chosenIndex = Integer.parseInt(chosen);
