@@ -82,8 +82,8 @@ public class GameServer {
     private static void runGame(WebSocketChannel humanChannel, String aiBridgeUrl) {
         try {
             RegisteredPlayer human = RegisteredPlayer.forCommander(
-                    loadPreconDeck("Subjective Reality [C18] [2018].dck"))
-                    .setPlayer(new LobbyPlayerRemote("Human (Aminatou)", humanChannel, humanChannel));
+                    loadPreconDeck("Miracle Worker [DSC] [2024].dck"))
+                    .setPlayer(new LobbyPlayerRemote("Human (Aminatou Veil-Piercer)", humanChannel, humanChannel));
             // All seats - human and AI - go through RemotePlayerController.
             // AI seats route over HTTP to the same ai-bridge stub (currently
             // random); see RemotePlayerController's class comment for why it

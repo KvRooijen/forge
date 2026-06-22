@@ -201,6 +201,52 @@ public class RemotePlayerController extends PlayerController {
         return channel.ask(new DecisionRequest(UUID.randomUUID().toString(), type, prompt, options, safeBuildStateView(player)));
     }
 
+    private DecisionResponse askList(String prompt, List<DecisionRequest.Option> options, int min, int max) {
+        DecisionRequest req = new DecisionRequest(UUID.randomUUID().toString(), "CHOOSE_LIST", prompt, options, safeBuildStateView(player));
+        req.min = min;
+        req.max = max;
+        return channel.ask(req);
+    }
+
+    /**
+     * Generic "pick between min and max items from this list" decision -
+     * backs scry/surveil arrangement, modal-spell mode choice, sacrifice/
+     * discard targets, dig effects, type choices, etc. Replacing each of
+     * those individually-stubbed PlayerController methods with a call into
+     * this shared helper means one real UI control (a checkbox list, or a
+     * click-to-toggle on the card itself when cardIdFn is given) covers all
+     * of them instead of each picking randomly.
+     */
+    private <T> List<T> chooseFromList(String prompt, List<T> source, int min, int max,
+            java.util.function.Function<T, String> labelFn, java.util.function.Function<T, String> cardIdFn) {
+        if (source.isEmpty()) {
+            return new ArrayList<>();
+        }
+        List<DecisionRequest.Option> options = new ArrayList<>();
+        for (int i = 0; i < source.size(); i++) {
+            T item = source.get(i);
+            options.add(new DecisionRequest.Option(String.valueOf(i), labelFn.apply(item),
+                    cardIdFn != null ? cardIdFn.apply(item) : null));
+        }
+        DecisionResponse resp = askList(prompt, options, Math.max(min, 0), Math.min(max, source.size()));
+        List<T> chosen = new ArrayList<>();
+        if (resp.chosenIds != null) {
+            for (String id : resp.chosenIds) {
+                try {
+                    int idx = Integer.parseInt(id);
+                    if (idx >= 0 && idx < source.size()) {
+                        chosen.add(source.get(idx));
+                    }
+                } catch (NumberFormatException ignored) { }
+            }
+        }
+        return chosen;
+    }
+
+    private static String cardIdOf(Object o) {
+        return (o instanceof Card c) ? String.valueOf(c.getId()) : null;
+    }
+
     /**
      * Pushes a fresh state snapshot (from the human's perspective) to the
      * human's WebSocket whenever anything happens, on any seat - not just
@@ -410,12 +456,14 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public CardCollectionView choosePermanentsToSacrifice(SpellAbility sa, int min, int max, CardCollectionView validTargets, String message) {
-        return new CardCollection(pickN(validTargets, min));
+        return new CardCollection(chooseFromList(message != null ? message : "Choose permanents to sacrifice",
+                new ArrayList<>(validTargets), min, max, Card::toString, RemotePlayerController::cardIdOf));
     }
 
     @Override
     public CardCollectionView choosePermanentsToDestroy(SpellAbility sa, int min, int max, CardCollectionView validTargets, String message) {
-        return new CardCollection(pickN(validTargets, min));
+        return new CardCollection(chooseFromList(message != null ? message : "Choose permanents to destroy",
+                new ArrayList<>(validTargets), min, max, Card::toString, RemotePlayerController::cardIdOf));
     }
 
     @Override
@@ -450,7 +498,9 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public CardCollectionView chooseCardsForEffect(CardCollectionView sourceList, SpellAbility sa, String title, int min, int max, boolean isOptional, Map<String, Object> params) {
-        return new CardCollection(pickN(sourceList, isOptional ? 0 : min));
+        int effectiveMin = isOptional ? 0 : min;
+        return new CardCollection(chooseFromList(title != null ? title : "Choose cards", new ArrayList<>(sourceList),
+                effectiveMin, max, Card::toString, RemotePlayerController::cardIdOf));
     }
 
     @Override
@@ -460,12 +510,15 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public <T extends GameEntity> T chooseSingleEntityForEffect(FCollectionView<T> optionList, DelayedReveal delayedReveal, SpellAbility sa, String title, boolean isOptional, Player relatedPlayer, Map<String, Object> params) {
-        return (isOptional && randomBoolean()) ? null : pickOne(optionList);
+        List<T> chosen = chooseFromList(title != null ? title : "Choose one", new ArrayList<>(optionList),
+                isOptional ? 0 : 1, 1, String::valueOf, RemotePlayerController::cardIdOf);
+        return chosen.isEmpty() ? null : chosen.get(0);
     }
 
     @Override
     public <T extends GameEntity> List<T> chooseEntitiesForEffect(FCollectionView<T> optionList, int min, int max, DelayedReveal delayedReveal, SpellAbility sa, String title, Player relatedPlayer, Map<String, Object> params) {
-        return pickN(optionList, min);
+        return chooseFromList(title != null ? title : "Choose entities", new ArrayList<>(optionList),
+                min, max, String::valueOf, RemotePlayerController::cardIdOf);
     }
 
     @Override
@@ -546,12 +599,29 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForScry(CardCollection topN) {
-        return new ImmutablePair<>(topN, new CardCollection());
+        // GameAction.scry() reverses+replays toTop, so cards we don't move
+        // out keep their original relative order automatically - we only
+        // need to ask which ones go to the bottom.
+        List<Card> toBottom = chooseFromList("Scry " + topN.size() + " - choose cards to put on the BOTTOM of your library",
+                new ArrayList<>(topN), 0, topN.size(), Card::toString, RemotePlayerController::cardIdOf);
+        CardCollection top = new CardCollection();
+        CardCollection bottom = new CardCollection();
+        for (Card c : topN) {
+            (toBottom.contains(c) ? bottom : top).add(c);
+        }
+        return new ImmutablePair<>(top, bottom);
     }
 
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) {
-        return new ImmutablePair<>(topN, new CardCollection());
+        List<Card> toGrave = chooseFromList("Surveil " + topN.size() + " - choose cards to put into your graveyard",
+                new ArrayList<>(topN), 0, topN.size(), Card::toString, RemotePlayerController::cardIdOf);
+        CardCollection top = new CardCollection();
+        CardCollection grave = new CardCollection();
+        for (Card c : topN) {
+            (toGrave.contains(c) ? grave : top).add(c);
+        }
+        return new ImmutablePair<>(top, grave);
     }
 
     @Override
@@ -561,12 +631,28 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone, SpellAbility source) {
-        return cards;
+        // Caller moves cards to the zone one at a time in list order with
+        // no reversal, so the LAST card in our returned list ends up on
+        // top. Ask the player top-to-bottom (most natural framing), then
+        // reverse before returning.
+        List<Card> remaining = new ArrayList<>(cards);
+        List<Card> topToBottom = new ArrayList<>();
+        while (!remaining.isEmpty()) {
+            String prompt = "Put cards back in order - choose position " + (topToBottom.size() + 1)
+                    + " of " + cards.size() + " from the top";
+            List<Card> pick = chooseFromList(prompt, remaining, 1, 1, Card::toString, RemotePlayerController::cardIdOf);
+            Card chosen = pick.isEmpty() ? remaining.get(0) : pick.get(0);
+            topToBottom.add(chosen);
+            remaining.remove(chosen);
+        }
+        java.util.Collections.reverse(topToBottom);
+        return new CardCollection(topToBottom);
     }
 
     @Override
     public CardCollectionView chooseCardsToDiscardFrom(Player playerDiscard, SpellAbility sa, CardCollection validCards, int min, int max, CardCollectionView visibleToChooser) {
-        return new CardCollection(pickN(validCards, min));
+        return new CardCollection(chooseFromList("Choose cards to discard", new ArrayList<>(validCards),
+                min, max, Card::toString, RemotePlayerController::cardIdOf));
     }
 
     @Override
@@ -621,7 +707,9 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public String chooseSomeType(String kindOfType, SpellAbility sa, Collection<String> validTypes, boolean isOptional) {
-        return (isOptional && randomBoolean()) ? null : pickOne(toList(validTypes));
+        List<String> chosen = chooseFromList("Choose a " + kindOfType, toList(validTypes),
+                isOptional ? 0 : 1, 1, s -> s, null);
+        return chosen.isEmpty() ? null : chosen.get(0);
     }
 
     @Override
@@ -730,7 +818,12 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public List<AbilitySub> chooseModeForAbility(SpellAbility sa, List<AbilitySub> possible, int min, int num, boolean allowRepeat) {
-        return pickN(possible, num);
+        // allowRepeat (choosing the same mode more than once) isn't modeled
+        // by chooseFromList yet, since none of the cards we've audited so
+        // far need it - revisit if that turns out to matter.
+        int count = Math.min(num, possible.size());
+        return chooseFromList("Choose a mode", possible, Math.min(min, count), count,
+                AbilitySub::toString, null);
     }
 
     @Override
@@ -1015,12 +1108,15 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public Card chooseSingleCardForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility sa, CardCollection fetchList, DelayedReveal delayedReveal, String selectPrompt, boolean isOptional, Player decider) {
-        return (isOptional && randomBoolean()) ? null : pickOne(fetchList);
+        List<Card> chosen = chooseFromList(selectPrompt != null ? selectPrompt : "Choose a card", new ArrayList<>(fetchList),
+                isOptional ? 0 : 1, 1, Card::toString, RemotePlayerController::cardIdOf);
+        return chosen.isEmpty() ? null : chosen.get(0);
     }
 
     @Override
     public List<Card> chooseCardsForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility sa, CardCollection fetchList, int min, int max, DelayedReveal delayedReveal, String selectPrompt, Player decider) {
-        return pickN(fetchList, min);
+        return chooseFromList(selectPrompt != null ? selectPrompt : "Choose cards", new ArrayList<>(fetchList),
+                min, max, Card::toString, RemotePlayerController::cardIdOf);
     }
 
     @Override

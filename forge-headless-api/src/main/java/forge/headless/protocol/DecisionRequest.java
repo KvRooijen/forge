@@ -13,6 +13,9 @@ public class DecisionRequest {
     public String prompt;
     public List<Option> options;
     public GameStateView state;
+    /** Only meaningful for CHOOSE_LIST: how many of `options` must/may be picked. */
+    public Integer min;
+    public Integer max;
 
     public DecisionRequest() { }
 
