@@ -958,7 +958,21 @@ public class RemotePlayerController extends PlayerController {
                 // the AI's mana-payment evaluator as this player's real
                 // controller, so its internal "instanceof PlayerControllerAi"
                 // checks succeed instead of seeing this wrapper.
-                player.runWithController(() -> forge.ai.ComputerUtilMana.payManaCost(toPay, ability, player, effect), delegate);
+                //
+                // Forge's real UI only enables the Auto button once a dry
+                // run (canPayManaCost, no side effects) confirms the cost is
+                // actually payable. ComputerUtilMana.payManaCost itself is
+                // NOT atomic - on a real (non-test) attempt it taps sources
+                // and spends floating mana as it goes, and if it ends up
+                // unable to complete the cost, those partial taps are only
+                // undone via the ability's own paying-mana refund tracking.
+                // Skipping the dry run risked tapping out real sources for
+                // an attempt already known to fail.
+                boolean[] canPay = new boolean[1];
+                player.runWithController(() -> canPay[0] = forge.ai.ComputerUtilMana.canPayManaCost(toPay, ability, player, effect), delegate);
+                if (canPay[0]) {
+                    player.runWithController(() -> forge.ai.ComputerUtilMana.payManaCost(toPay, ability, player, effect), delegate);
+                }
             } else {
                 int idx;
                 try {

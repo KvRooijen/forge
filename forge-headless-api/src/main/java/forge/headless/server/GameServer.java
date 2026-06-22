@@ -94,15 +94,10 @@ public class GameServer {
             RegisteredPlayer ai1 = RegisteredPlayer.forCommander(
                     loadPreconDeck("Veloci-Ramp-Tor [LCC] [2023].dck"))
                     .setPlayer(new LobbyPlayerRemote("AI (Pantlaza)", new HttpChannel(aiBridgeUrl), humanChannel));
-            RegisteredPlayer ai2 = RegisteredPlayer.forCommander(
-                    loadPreconDeck("Explorers of the Deep [LCC] [2023].dck"))
-                    .setPlayer(new LobbyPlayerRemote("AI (Hakbal)", new HttpChannel(aiBridgeUrl), humanChannel));
-            RegisteredPlayer ai3 = RegisteredPlayer.forCommander(
-                    loadPreconDeck("Temur Roar [TDC] [2025].dck"))
-                    .setPlayer(new LobbyPlayerRemote("AI (Eshki)", new HttpChannel(aiBridgeUrl), humanChannel));
+            // Temporarily 1v1 (Hakbal/Eshki seats disabled) for easier debugging.
 
             GameRules rules = new GameRules(GameType.Commander);
-            Match match = new Match(rules, List.of(human, ai1, ai2, ai3), "Playtest");
+            Match match = new Match(rules, List.of(human, ai1), "Playtest");
             Game game = match.createGame();
             match.startGame(game);
 
