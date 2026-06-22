@@ -377,9 +377,34 @@ public class RemotePlayerController extends PlayerController {
 
     private List<CardStateView> toCardViews(Iterable<Card> cards) {
         List<CardStateView> views = new ArrayList<>();
+        forge.game.combat.Combat combat = player.getGame().getCombat();
         for (Card c : cards) {
             if (c.getType().toString().isEmpty()) {
                 continue;
+            }
+            Map<String, Integer> counters = new java.util.LinkedHashMap<>();
+            for (Map.Entry<forge.game.card.CounterType, Integer> e : c.getCounters().entrySet()) {
+                if (e.getValue() != null && e.getValue() != 0) {
+                    counters.put(e.getKey().toString(), e.getValue());
+                }
+            }
+            boolean attacking = false;
+            String attackingTarget = null;
+            String blockingAttacker = null;
+            if (combat != null) {
+                if (combat.isAttacking(c)) {
+                    attacking = true;
+                    forge.game.GameEntity defender = combat.getDefenderByAttacker(c);
+                    attackingTarget = defender != null ? defender.toString() : null;
+                }
+                if (combat.isBlocking(c)) {
+                    for (Card att : combat.getAttackers()) {
+                        if (combat.getBlockers(att).contains(c)) {
+                            blockingAttacker = att.getName();
+                            break;
+                        }
+                    }
+                }
             }
             views.add(new CardStateView(
                     String.valueOf(c.getId()),
@@ -389,7 +414,12 @@ public class RemotePlayerController extends PlayerController {
                     c.isCreature() ? c.getNetPower() : null,
                     c.isCreature() ? c.getNetToughness() : null,
                     c.isTapped(),
-                    c.isCommander()));
+                    c.isCommander(),
+                    c.isSick(),
+                    counters,
+                    attacking,
+                    attackingTarget,
+                    blockingAttacker));
         }
         return views;
     }
