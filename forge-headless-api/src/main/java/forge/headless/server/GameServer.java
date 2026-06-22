@@ -129,6 +129,25 @@ public class GameServer {
         CardStorageReader reader = new CardStorageReader(cardsDir.getAbsolutePath(), null, false);
         new StaticData(reader, null, editionsDir.getAbsolutePath(), editionsDir.getAbsolutePath(),
                 blockDataDir.getAbsolutePath(), "Latest Art All Editions", true, false);
+
+        // Without this, forge.card.CardType.Constant.BASIC_TYPES (and
+        // LAND_TYPES/CREATURE_TYPES/etc) stay permanently empty, since
+        // they're normally populated by FModel.loadDynamicGamedata() during
+        // the desktop client's own startup - which we don't run. The
+        // practical effect: every basic land's subtype ("Plains", "Island",
+        // ...) gets silently rejected as "not a known subtype" while
+        // parsing its card type, so CardState's LandTraitChanges (which
+        // injects basic lands' "{T}: Add {X}" mana ability based on
+        // matching that subtype) never finds a match and adds nothing -
+        // basic lands end up with zero mana abilities, completely
+        // untappable, while every other land (whose ability comes from an
+        // explicit script line, not subtype-driven injection) works fine.
+        File typeListFile = new File(resDir, "lists/TypeLists.txt");
+        Map<String, List<String>> typeSections = forge.util.FileSection.parseSections(
+                forge.util.FileUtil.readFile(typeListFile.getAbsolutePath()));
+        for (String sectionName : typeSections.keySet()) {
+            forge.card.CardType.Helper.parseTypes(sectionName, typeSections.get(sectionName));
+        }
     }
 
     private static File resolveResDir() {
