@@ -23,13 +23,16 @@ public class CardStateView {
     public String attackingTarget;
     /** Name of the attacker this card is blocking, if any. */
     public String blockingAttacker;
+    /** Has at least one mana ability - lets the frontend group mana rocks
+     * onto the same row as lands instead of with other artifacts. */
+    public boolean producesMana;
 
     public CardStateView() { }
 
     public CardStateView(String id, String name, String manaCost, String typeLine,
             Integer power, Integer toughness, boolean tapped, boolean isCommander,
             boolean sick, Map<String, Integer> counters, boolean attacking,
-            String attackingTarget, String blockingAttacker) {
+            String attackingTarget, String blockingAttacker, boolean producesMana) {
         this.id = id;
         this.name = name;
         this.manaCost = manaCost;
@@ -43,5 +46,6 @@ public class CardStateView {
         this.attacking = attacking;
         this.attackingTarget = attackingTarget;
         this.blockingAttacker = blockingAttacker;
+        this.producesMana = producesMana;
     }
 }

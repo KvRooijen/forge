@@ -433,7 +433,8 @@ public class RemotePlayerController extends PlayerController {
                     counters,
                     attacking,
                     attackingTarget,
-                    blockingAttacker));
+                    blockingAttacker,
+                    !c.getManaAbilities().isEmpty()));
         }
         return views;
     }
@@ -640,7 +641,15 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public boolean confirmTrigger(WrappedAbility sa) {
-        return randomBoolean();
+        // Only reached for triggers with an OptionalDecider (this is what
+        // backs Miracle: "Drawn" triggers with OptionalDecider$ You decide
+        // whether to even reveal the card) - mandatory triggers (no
+        // decider, e.g. Aminatou's upkeep surveil) never call this at all.
+        // Was a coin flip; that's why Miracle never worked - half the time
+        // it silently declined to reveal instead of asking.
+        String prompt = "Reveal " + sa.getHostCard().getName() + " (" + sa.getStackDescription() + ")?";
+        DecisionResponse resp = ask("CONFIRM", prompt, null);
+        return resp.booleanValue != null ? resp.booleanValue : false;
     }
 
     @Override
