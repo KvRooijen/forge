@@ -111,16 +111,16 @@ public class RemotePlayerController extends PlayerController {
 
     /**
      * Game.getPhaseHandler().getTurn() value (the GLOBAL turn counter,
-     * shared by every player - not Player.getTurn(), which only counts
-     * this player's own turns and therefore never changes while it's an
-     * opponent's turn) for which "End Turn" was pressed. While it matches
-     * the current global turn, every remaining priority window this seat
-     * gets auto-passes regardless of stopPhases, same idea as Forge's own
-     * End Turn button. Naturally stops applying once the global turn
-     * advances, no reset needed. Doesn't affect mandatory decisions
-     * (declare attackers/blockers, paying for something already on the
-     * stack) - those go through separate controller methods that always
-     * ask.
+     * shared by every player - whoever's turn it is) for which "End Turn"
+     * was pressed. While it matches the current global turn, every
+     * remaining priority window this seat gets auto-passes, regardless of
+     * whether it's this seat's own turn or an opponent's - "End Turn"
+     * always means "stop asking me for the rest of *this* turn," same as
+     * Forge's own End Turn button, and it's available on every turn, not
+     * just your own. Naturally stops applying once the global turn
+     * advances. Doesn't affect mandatory decisions (declare attackers/
+     * blockers, paying for something already on the stack) - those go
+     * through separate controller methods that always ask.
      */
     private int autoPassEndTurnAt = -1;
     private static final String END_TURN_OPTION = "__END_TURN__";
