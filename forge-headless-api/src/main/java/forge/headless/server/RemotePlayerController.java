@@ -108,6 +108,19 @@ public class RemotePlayerController extends PlayerController {
             forge.game.phase.PhaseType.COMBAT_DECLARE_BLOCKERS,
             forge.game.phase.PhaseType.MAIN2);
 
+    /**
+     * Player.getTurn() value (this player's own turn counter) for which
+     * "End Turn" was pressed - while it matches the current turn, every
+     * remaining priority window this turn auto-passes regardless of
+     * stopPhases, same idea as Forge's own End Turn button. Naturally
+     * stops applying once the player's turn counter advances, no reset
+     * needed. Doesn't affect mandatory decisions (declare attackers/
+     * blockers, paying for something already on the stack) - those go
+     * through separate controller methods that always ask.
+     */
+    private int autoPassEndTurnAt = -1;
+    private static final String END_TURN_OPTION = "__END_TURN__";
+
     public RemotePlayerController(Game game, Player p, LobbyPlayer lp, RemoteChannel channel,
             forge.headless.protocol.WebSocketChannel spectatorChannel) {
         super(game, p, lp);
@@ -772,6 +785,9 @@ public class RemotePlayerController extends PlayerController {
     public List<SpellAbility> chooseSpellAbilityToPlay() {
         pushSpectatorUpdate();
         Game g = player.getGame();
+        if (autoPassEndTurnAt == player.getTurn()) {
+            return null;
+        }
         if (g.getStackZone().isEmpty() && !stopPhases.contains(g.getPhaseHandler().getPhase())) {
             return null;
         }
@@ -795,11 +811,17 @@ public class RemotePlayerController extends PlayerController {
             String cardId = sa.getHostCard() != null ? String.valueOf(sa.getHostCard().getId()) : null;
             options.add(new DecisionRequest.Option(String.valueOf(i), sa.toString(), cardId));
         }
+        options.add(new DecisionRequest.Option(END_TURN_OPTION, "End Turn", null));
         DecisionResponse resp = ask("CHOOSE_SPELL_ABILITY", "Choose a play, or none to pass priority", options);
         if (resp.chosenIds == null || resp.chosenIds.isEmpty()) {
             return null;
         }
-        int chosenIndex = Integer.parseInt(resp.chosenIds.get(0));
+        String chosen = resp.chosenIds.get(0);
+        if (chosen.equals(END_TURN_OPTION)) {
+            autoPassEndTurnAt = player.getTurn();
+            return null;
+        }
+        int chosenIndex = Integer.parseInt(chosen);
         return List.of(legalPlays.get(chosenIndex));
     }
 
