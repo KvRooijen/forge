@@ -161,6 +161,32 @@ public class RemotePlayerController extends PlayerController {
         return random.nextBoolean();
     }
 
+    /**
+     * Temporarily swaps the player's actual controller to the embedded AI
+     * delegate for the duration of the call, the same trick Forge's own
+     * InputPayMana uses for its "Auto" button (Player.runWithController).
+     * Without this, forge-ai code that does "ai.getController() instanceof
+     * PlayerControllerAi" (common in mana/cost evaluation) sees this
+     * wrapper instead and throws - wrapping a Runnable around the real
+     * delegate makes player.getController() briefly return the real thing.
+     */
+    private <T> T withDelegate(java.util.function.Supplier<T> call, T fallback) {
+        return safely(() -> {
+            Object[] result = new Object[1];
+            player.runWithController(() -> result[0] = call.get(), delegate);
+            @SuppressWarnings("unchecked")
+            T value = (T) result[0];
+            return value;
+        }, fallback);
+    }
+
+    private void withDelegateVoid(Runnable call) {
+        safely(() -> {
+            player.runWithController(call, delegate);
+            return null;
+        }, null);
+    }
+
     private <T> T safely(java.util.function.Supplier<T> call, T fallback) {
         try {
             return call.get();
@@ -251,7 +277,10 @@ public class RemotePlayerController extends PlayerController {
         }
 
         return new GameStateView(
-                g.getPhaseHandler().getTurn(),
+                // Player.getTurn() is that player's own turn count (their
+                // 1st, 2nd, 3rd... turn), not the global turn number across
+                // all 4 players, which is what "Turn N" should mean here.
+                active != null ? active.getTurn() : g.getPhaseHandler().getTurn(),
                 phase != null ? phase.name() : "",
                 active != null ? active.getName() : null,
                 playerViews,
@@ -331,10 +360,7 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public void playSpellAbilityNoStack(SpellAbility effectSA, boolean mayChoseNewTargets) {
-        safely(() -> {
-            delegate.playSpellAbilityNoStack(effectSA, mayChoseNewTargets);
-            return null;
-        }, null);
+        withDelegateVoid(() -> delegate.playSpellAbilityNoStack(effectSA, mayChoseNewTargets));
     }
 
     @Override
@@ -344,10 +370,7 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public void orderAndPlaySimultaneousSa(List<SpellAbility> activePlayerSAs) {
-        safely(() -> {
-            delegate.orderAndPlaySimultaneousSa(activePlayerSAs);
-            return null;
-        }, null);
+        withDelegateVoid(() -> delegate.orderAndPlaySimultaneousSa(activePlayerSAs));
     }
 
     @Override
@@ -372,17 +395,17 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public Map<Card, Integer> assignCombatDamage(Card attacker, CardCollectionView blockers, CardCollectionView remaining, int damageDealt, GameEntity defender, boolean overrideOrder) {
-        return safely(() -> delegate.assignCombatDamage(attacker, blockers, remaining, damageDealt, defender, overrideOrder), new java.util.HashMap<>());
+        return withDelegate(() -> delegate.assignCombatDamage(attacker, blockers, remaining, damageDealt, defender, overrideOrder), new java.util.HashMap<>());
     }
 
     @Override
     public Map<GameEntity, Integer> divideShield(Card effectSource, Map<GameEntity, Integer> affected, int shieldAmount) {
-        return safely(() -> delegate.divideShield(effectSource, affected, shieldAmount), new java.util.HashMap<>());
+        return withDelegate(() -> delegate.divideShield(effectSource, affected, shieldAmount), new java.util.HashMap<>());
     }
 
     @Override
     public Map<Byte, Integer> specifyManaCombo(SpellAbility sa, ColorSet colorSet, int manaAmount, boolean different) {
-        return safely(() -> delegate.specifyManaCombo(sa, colorSet, manaAmount, different), new java.util.HashMap<>());
+        return withDelegate(() -> delegate.specifyManaCombo(sa, colorSet, manaAmount, different), new java.util.HashMap<>());
     }
 
     @Override
@@ -402,12 +425,12 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public TargetChoices chooseNewTargetsFor(SpellAbility ability, Predicate<GameObject> filter, boolean optional) {
-        return safely(() -> delegate.chooseNewTargetsFor(ability, filter, optional), null);
+        return withDelegate(() -> delegate.chooseNewTargetsFor(ability, filter, optional), null);
     }
 
     @Override
     public boolean chooseTargetsFor(SpellAbility currentAbility) {
-        return safely(() -> delegate.chooseTargetsFor(currentAbility), false);
+        return withDelegate(() -> delegate.chooseTargetsFor(currentAbility), false);
     }
 
     @Override
@@ -487,10 +510,7 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public void declareBlockers(Player defender, Combat combat) {
-        safely(() -> {
-            delegate.declareBlockers(defender, combat);
-            return null;
-        }, null);
+        withDelegateVoid(() -> delegate.declareBlockers(defender, combat));
         pushSpectatorUpdate();
     }
 
@@ -746,8 +766,26 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public byte chooseColor(String message, SpellAbility sa, ColorSet colors) {
-        forge.card.MagicColor.Color choice = pickOne(new ArrayList<>(colors.toEnumSet()));
-        return choice != null ? choice.getColorMask() : 0;
+        List<forge.card.MagicColor.Color> choices = new ArrayList<>(colors.toEnumSet());
+        if (choices.isEmpty()) {
+            return 0;
+        }
+        if (choices.size() == 1) {
+            return choices.get(0).getColorMask();
+        }
+        List<DecisionRequest.Option> options = new ArrayList<>();
+        for (forge.card.MagicColor.Color c : choices) {
+            options.add(new DecisionRequest.Option(String.valueOf(c.getColorMask()), c.toString()));
+        }
+        DecisionResponse resp = ask("CHOOSE_COLOR", message, options);
+        if (resp.chosenIds == null || resp.chosenIds.isEmpty()) {
+            return choices.get(0).getColorMask();
+        }
+        try {
+            return (byte) Integer.parseInt(resp.chosenIds.get(0));
+        } catch (NumberFormatException e) {
+            return choices.get(0).getColorMask();
+        }
     }
 
     @Override
@@ -851,23 +889,98 @@ public class RemotePlayerController extends PlayerController {
         return false;
     }
 
-    // ---- Mana/cost payment: no headless-safe non-AI implementation exists
-    // yet (see class comment), so this stays on the embedded delegate,
-    // guarded so a failure here can't take down the whole game thread. ----
+    // ---- Mana payment: mirrors Forge's own InputPayMana - tap mana sources
+    // one at a time (each tap resolves immediately, same as clicking a land
+    // in Forge's UI), or auto-pay, or cancel. Cancelling mid-payment doesn't
+    // need its own undo logic: forge.game.player.PlaySpellAbility already
+    // rolls back the whole cast (untaps lands, refunds mana, takes the
+    // spell back off the stack) whenever applyManaToCost returns false. ----
+
+    private static final String AUTO_PAY_OPTION = "__AUTO__";
+    private static final String CANCEL_PAY_OPTION = "__CANCEL__";
 
     @Override
     public boolean payManaCost(ManaCost toPay, CostPartMana costPartMana, SpellAbility sa, String prompt, ManaConversionMatrix matrix, boolean effect) {
-        return safely(() -> delegate.payManaCost(toPay, costPartMana, sa, prompt, matrix, effect), false);
+        // Shared engine routine (same one PlayerControllerHuman uses) - it
+        // calls back into our own applyManaToCost below for the actual
+        // tap-or-auto-or-cancel interaction.
+        return forge.game.player.PlaySpellAbility.payManaCost(this, toPay, costPartMana, sa, player, prompt, matrix, effect);
     }
 
     @Override
     public boolean applyManaToCost(ManaCostBeingPaid toPay, SpellAbility ability, String prompt, ManaConversionMatrix matrix, boolean effect) {
-        return safely(() -> delegate.applyManaToCost(toPay, ability, prompt, matrix, effect), false);
+        // Guard against an unpayable cost looping forever: if neither a tap
+        // nor an auto-pay attempt actually reduces what's left to pay for a
+        // couple of rounds in a row, give up instead of re-asking forever.
+        // This matters most for bot seats, which always answer "auto-pay"
+        // and have no human to notice nothing is progressing and cancel.
+        String lastRemaining = null;
+        int stallCount = 0;
+
+        while (!toPay.isPaid()) {
+            String remainingNow = toPay.toString(false, player.getManaPool());
+            if (remainingNow.equals(lastRemaining)) {
+                stallCount++;
+                if (stallCount >= 2) {
+                    return false;
+                }
+            } else {
+                stallCount = 0;
+            }
+            lastRemaining = remainingNow;
+
+            List<SpellAbility> sources = new ArrayList<>();
+            for (Card c : player.getCardsIn(ZoneType.Battlefield)) {
+                for (SpellAbility ma : c.getManaAbilities()) {
+                    ma.setActivatingPlayer(player);
+                    if (ma.canPlay(true)) {
+                        sources.add(ma);
+                    }
+                }
+            }
+
+            List<DecisionRequest.Option> options = new ArrayList<>();
+            for (int i = 0; i < sources.size(); i++) {
+                SpellAbility ma = sources.get(i);
+                options.add(new DecisionRequest.Option(String.valueOf(i), ma.toString(), String.valueOf(ma.getHostCard().getId())));
+            }
+            options.add(new DecisionRequest.Option(AUTO_PAY_OPTION, "Auto-pay remaining cost", null));
+            options.add(new DecisionRequest.Option(CANCEL_PAY_OPTION, "Cancel", null));
+
+            String remaining = toPay.toString(false, player.getManaPool());
+            DecisionResponse resp = ask("PAY_MANA", (prompt != null ? prompt : "Pay mana cost") + " - remaining: " + remaining, options);
+            String chosen = resp.chosenIds == null || resp.chosenIds.isEmpty() ? CANCEL_PAY_OPTION : resp.chosenIds.get(0);
+
+            if (chosen.equals(CANCEL_PAY_OPTION)) {
+                return false;
+            } else if (chosen.equals(AUTO_PAY_OPTION)) {
+                // Same trick Forge's own "Auto" button uses: temporarily run
+                // the AI's mana-payment evaluator as this player's real
+                // controller, so its internal "instanceof PlayerControllerAi"
+                // checks succeed instead of seeing this wrapper.
+                player.runWithController(() -> forge.ai.ComputerUtilMana.payManaCost(toPay, ability, player, effect), delegate);
+            } else {
+                int idx;
+                try {
+                    idx = Integer.parseInt(chosen);
+                } catch (NumberFormatException e) {
+                    idx = -1;
+                }
+                if (idx >= 0 && idx < sources.size()) {
+                    SpellAbility tapAbility = sources.get(idx);
+                    if (forge.game.player.PlaySpellAbility.playSpellAbility(this, player, tapAbility)) {
+                        player.getManaPool().payManaFromAbility(ability, toPay, tapAbility);
+                    }
+                }
+            }
+            pushSpectatorUpdate();
+        }
+        return true;
     }
 
     @Override
     public CostDecisionMakerBase getCostDecisionMaker(Player player, SpellAbility ability, boolean effect, String prompt) {
-        return safely(() -> delegate.getCostDecisionMaker(player, ability, effect, prompt), null);
+        return withDelegate(() -> delegate.getCostDecisionMaker(player, ability, effect, prompt), null);
     }
 
     @Override
