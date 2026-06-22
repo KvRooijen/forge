@@ -124,11 +124,22 @@ public class GameServer {
         ImageKeys.initializeDirs("", java.util.Collections.emptyMap(), "", "", "", "", "", "", "");
 
         File cardsDir = new File(resDir, "cardsfolder");
+        File tokensDir = new File(resDir, "tokenscripts");
         File editionsDir = new File(resDir, "editions");
         File blockDataDir = new File(resDir, "blockdata");
+        File setLookupDir = new File(resDir, "setlookup");
         CardStorageReader reader = new CardStorageReader(cardsDir.getAbsolutePath(), null, false);
-        new StaticData(reader, null, editionsDir.getAbsolutePath(), editionsDir.getAbsolutePath(),
-                blockDataDir.getAbsolutePath(), "Latest Art All Editions", true, false);
+        // The simpler 8-arg StaticData constructor (no tokenReader) was
+        // silently leaving StaticData.getAllTokens() null - every token-
+        // creating effect (Sower of Discord, Sol Ring's... no, but plenty
+        // of others) threw a NullPointerException the moment it resolved.
+        // Mirrors FModel's own real constructor call (forge-gui's actual
+        // startup), just with custom card/token readers omitted since we
+        // don't support those.
+        CardStorageReader tokenReader = new CardStorageReader(tokensDir.getAbsolutePath(), null, false);
+        new StaticData(reader, tokenReader, null, null, editionsDir.getAbsolutePath(),
+                editionsDir.getAbsolutePath(), blockDataDir.getAbsolutePath(), setLookupDir.getAbsolutePath(),
+                "Latest Art All Editions", true, false, false, false);
 
         // Without this, forge.card.CardType.Constant.BASIC_TYPES (and
         // LAND_TYPES/CREATURE_TYPES/etc) stay permanently empty, since
