@@ -38,6 +38,12 @@ public class DecisionRequest {
         public String id;
         public String label;
         public String cardId;
+        /** Full card data for rendering a real card preview instead of just
+         * the text label - set even for cards outside the normal public
+         * board state (e.g. scry/surveil/dig candidates sitting in the
+         * library), since the player legitimately sees them at decision
+         * time even though we don't otherwise serialize that zone. */
+        public CardStateView card;
 
         public Option() { }
 
@@ -50,6 +56,13 @@ public class DecisionRequest {
             this.id = id;
             this.label = label;
             this.cardId = cardId;
+        }
+
+        public Option(String id, String label, String cardId, CardStateView card) {
+            this.id = id;
+            this.label = label;
+            this.cardId = cardId;
+            this.card = card;
         }
     }
 }

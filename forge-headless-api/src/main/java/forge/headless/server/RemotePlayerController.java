@@ -81,13 +81,15 @@ import java.util.function.Predicate;
  */
 public class RemotePlayerController extends PlayerController {
 
-    /** Log entry types worth showing as "real actions" - excludes PHASE/TURN noise. */
+    /** Log entry types worth showing as "real actions" - excludes PHASE/TURN
+     * noise, and MANA (tapping a land/rock for mana is too frequent/low-value
+     * to be worth a log line - the floating-mana indicator already shows it). */
     private static final java.util.Set<forge.game.GameLogEntryType> ACTION_LOG_TYPES = java.util.EnumSet.of(
             forge.game.GameLogEntryType.DAMAGE, forge.game.GameLogEntryType.LIFE,
             forge.game.GameLogEntryType.ZONE_CHANGE, forge.game.GameLogEntryType.LAND,
             forge.game.GameLogEntryType.DISCARD, forge.game.GameLogEntryType.COMBAT,
             forge.game.GameLogEntryType.STACK_ADD, forge.game.GameLogEntryType.STACK_RESOLVE,
-            forge.game.GameLogEntryType.MANA, forge.game.GameLogEntryType.MULLIGAN,
+            forge.game.GameLogEntryType.MULLIGAN,
             forge.game.GameLogEntryType.INFORMATION, forge.game.GameLogEntryType.EFFECT_REPLACED,
             forge.game.GameLogEntryType.GAME_OUTCOME);
 
@@ -110,8 +112,11 @@ public class RemotePlayerController extends PlayerController {
     private final Map<String, EnumSet<forge.game.phase.PhaseType>> stopPhasesByTurnPlayer = new java.util.HashMap<>();
 
     private static EnumSet<forge.game.phase.PhaseType> defaultStopPhases() {
+        // Upkeep triggers (e.g. Aminatou's surveil) and mandatory decisions
+        // (declare attackers/blockers, mana payment) always ask regardless
+        // of stop-phase prefs - stopping at Upkeep by default just meant an
+        // extra "nothing to do, pass" click most turns.
         return EnumSet.of(
-                forge.game.phase.PhaseType.UPKEEP,
                 forge.game.phase.PhaseType.MAIN1,
                 forge.game.phase.PhaseType.COMBAT_DECLARE_ATTACKERS,
                 forge.game.phase.PhaseType.COMBAT_DECLARE_BLOCKERS,
@@ -264,8 +269,9 @@ public class RemotePlayerController extends PlayerController {
         List<DecisionRequest.Option> options = new ArrayList<>();
         for (int i = 0; i < source.size(); i++) {
             T item = source.get(i);
+            CardStateView cardView = item instanceof Card c ? toCardView(c) : null;
             options.add(new DecisionRequest.Option(String.valueOf(i), labelFn.apply(item),
-                    cardIdFn != null ? cardIdFn.apply(item) : null));
+                    cardIdFn != null ? cardIdFn.apply(item) : null, cardView));
         }
         DecisionResponse resp = askList(prompt, options, Math.max(min, 0), Math.min(max, source.size()));
         List<T> chosen = new ArrayList<>();
@@ -382,11 +388,18 @@ public class RemotePlayerController extends PlayerController {
                     floatingManaOf(p),
                     stopAtPhasesForP));
         }
+        // GameLog.getLogEntriesForTypes already returns newest-first (see
+        // its own doc comment) - taking a tail slice of that, like this
+        // used to do, grabs the OLDEST entries instead of the newest, and
+        // since "oldest 30" never changes once the game has more than 30
+        // actions, the log appeared to freeze as well as read backwards.
         List<String> log = new ArrayList<>();
         for (forge.game.GameLogEntry entry : g.getGameLog().getLogEntriesForTypes(ACTION_LOG_TYPES)) {
             log.add(entry.toString());
+            if (log.size() >= 30) {
+                break;
+            }
         }
-        int logStart = Math.max(0, log.size() - 30);
         forge.game.phase.PhaseType phase = g.getPhaseHandler().getPhase();
 
         return new GameStateView(
@@ -398,7 +411,7 @@ public class RemotePlayerController extends PlayerController {
                 active != null ? active.getName() : null,
                 playerViews,
                 toCardViews(g.getStackZone().getCards()),
-                log.subList(logStart, log.size()));
+                log);
     }
 
     private static final Map<String, Byte> MANA_COLOR_CODES = Map.of(
@@ -423,54 +436,67 @@ public class RemotePlayerController extends PlayerController {
 
     private List<CardStateView> toCardViews(Iterable<Card> cards) {
         List<CardStateView> views = new ArrayList<>();
-        forge.game.combat.Combat combat = player.getGame().getCombat();
         for (Card c : cards) {
-            if (c.getType().toString().isEmpty()) {
-                continue;
+            CardStateView view = toCardView(c);
+            if (view != null) {
+                views.add(view);
             }
-            Map<String, Integer> counters = new java.util.LinkedHashMap<>();
-            for (Map.Entry<forge.game.card.CounterType, Integer> e : c.getCounters().entrySet()) {
-                if (e.getValue() != null && e.getValue() != 0) {
-                    counters.put(e.getKey().toString(), e.getValue());
-                }
+        }
+        return views;
+    }
+
+    /** Single-card version of toCardViews - also used to attach a real,
+     * renderable card preview to decision options (chooseFromList), even
+     * for cards sitting in a zone we never otherwise serialize (library
+     * dig/search/scry/surveil candidates) - the player is legitimately
+     * allowed to see these at decision time, they're just not part of the
+     * normal public board state. */
+    private CardStateView toCardView(Card c) {
+        if (c.getType().toString().isEmpty()) {
+            return null;
+        }
+        forge.game.combat.Combat combat = player.getGame().getCombat();
+        Map<String, Integer> counters = new java.util.LinkedHashMap<>();
+        for (Map.Entry<forge.game.card.CounterType, Integer> e : c.getCounters().entrySet()) {
+            if (e.getValue() != null && e.getValue() != 0) {
+                counters.put(e.getKey().toString(), e.getValue());
             }
-            boolean attacking = false;
-            String attackingTarget = null;
-            String blockingAttacker = null;
-            if (combat != null) {
-                if (combat.isAttacking(c)) {
-                    attacking = true;
-                    forge.game.GameEntity defender = combat.getDefenderByAttacker(c);
-                    attackingTarget = defender != null ? defender.toString() : null;
-                }
-                if (combat.isBlocking(c)) {
-                    for (Card att : combat.getAttackers()) {
-                        if (combat.getBlockers(att).contains(c)) {
-                            blockingAttacker = att.getName();
-                            break;
-                        }
+        }
+        boolean attacking = false;
+        String attackingTarget = null;
+        String blockingAttacker = null;
+        if (combat != null) {
+            if (combat.isAttacking(c)) {
+                attacking = true;
+                forge.game.GameEntity defender = combat.getDefenderByAttacker(c);
+                attackingTarget = defender != null ? defender.toString() : null;
+            }
+            if (combat.isBlocking(c)) {
+                for (Card att : combat.getAttackers()) {
+                    if (combat.getBlockers(att).contains(c)) {
+                        blockingAttacker = att.getName();
+                        break;
                     }
                 }
             }
-            views.add(new CardStateView(
-                    String.valueOf(c.getId()),
-                    c.getName(),
-                    c.getManaCost() != null ? c.getManaCost().toString() : "",
-                    c.getType().toString(),
-                    c.isCreature() ? c.getNetPower() : null,
-                    c.isCreature() ? c.getNetToughness() : null,
-                    c.isTapped(),
-                    c.isCommander(),
-                    c.isSick(),
-                    counters,
-                    attacking,
-                    attackingTarget,
-                    blockingAttacker,
-                    !c.getManaAbilities().isEmpty(),
-                    c.isRoom() ? c.getUnlockedRoomNames() : new ArrayList<>(),
-                    c.isRoom() ? c.getLockedRoomNames() : new ArrayList<>()));
         }
-        return views;
+        return new CardStateView(
+                String.valueOf(c.getId()),
+                c.getName(),
+                c.getManaCost() != null ? c.getManaCost().toString() : "",
+                c.getType().toString(),
+                c.isCreature() ? c.getNetPower() : null,
+                c.isCreature() ? c.getNetToughness() : null,
+                c.isTapped(),
+                c.isCommander(),
+                c.isSick(),
+                counters,
+                attacking,
+                attackingTarget,
+                blockingAttacker,
+                !c.getManaAbilities().isEmpty(),
+                c.isRoom() ? c.getUnlockedRoomNames() : new ArrayList<>(),
+                c.isRoom() ? c.getLockedRoomNames() : new ArrayList<>());
     }
 
     // ---- Decisions wired to the remote channel ----
@@ -551,7 +577,38 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public void orderAndPlaySimultaneousSa(List<SpellAbility> activePlayerSAs) {
-        withDelegateVoid(() -> delegate.orderAndPlaySimultaneousSa(activePlayerSAs));
+        // This is the actual mechanism that puts queued (non-static)
+        // triggers on the stack - NOT WrappedAbility.resolve(), which only
+        // runs later when the stack gets around to resolving them, by
+        // which point targets must already be set (it deliberately reuses
+        // old targets, mayChoseNewTargets=false, matching real MTG rules:
+        // you choose targets when something goes on the stack, not when it
+        // resolves). Leaving this on the embedded AI delegate meant the AI
+        // silently chose targets for every queued trigger needing them
+        // (Extravagant Replication, Bottomless Pool's door-unlock return,
+        // Spirit-Sister's Call's graveyard choice, etc.) instead of asking.
+        List<SpellAbility> orderedSAs = orderSimultaneousSa(activePlayerSAs);
+        for (int i = orderedSAs.size() - 1; i >= 0; i--) {
+            SpellAbility next = orderedSAs.get(i);
+            if (next.isTrigger() && !next.isCopied()) {
+                safely(() -> forge.game.player.PlaySpellAbility.playSpellAbility(this, player, next), false);
+            } else {
+                if (next.isCopied()) {
+                    if (next.isSpell()) {
+                        if (!next.getHostCard().isInZone(ZoneType.Stack)) {
+                            next.setHostCard(player.getGame().getAction().moveToStack(next.getHostCard(), next));
+                        } else {
+                            player.getGame().getStackZone().add(next.getHostCard());
+                        }
+                    }
+                    if (next.isMayChooseNewTargets()) {
+                        next.setupNewTargets(player);
+                    }
+                }
+                player.getGame().getStack().add(next);
+            }
+        }
+        pushSpectatorUpdate();
     }
 
     @Override
@@ -1052,8 +1109,9 @@ public class RemotePlayerController extends PlayerController {
         List<DecisionRequest.Option> options = new ArrayList<>();
         for (int i = 0; i < legalPlays.size(); i++) {
             SpellAbility sa = legalPlays.get(i);
-            String cardId = sa.getHostCard() != null ? String.valueOf(sa.getHostCard().getId()) : null;
-            options.add(new DecisionRequest.Option(String.valueOf(i), sa.toString(), cardId));
+            Card host = sa.getHostCard();
+            String cardId = host != null ? String.valueOf(host.getId()) : null;
+            options.add(new DecisionRequest.Option(String.valueOf(i), sa.toString(), cardId, host != null ? toCardView(host) : null));
         }
         options.add(new DecisionRequest.Option(END_TURN_OPTION, "End Turn", null));
         DecisionResponse resp = ask("CHOOSE_SPELL_ABILITY", "Choose a play, or none to pass priority", options);
