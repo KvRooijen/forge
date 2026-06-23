@@ -253,6 +253,14 @@ public class RemotePlayerController extends PlayerController {
         if (source.isEmpty()) {
             return new ArrayList<>();
         }
+        // No real decision to make if every candidate must be taken anyway
+        // (min == max == the whole list, e.g. a single forced replacement
+        // effect, or "discard 2" with exactly 2 cards in hand) - asking
+        // anyway would just be a pointless click on every land that enters
+        // tapped.
+        if (min == max && min == source.size()) {
+            return new ArrayList<>(source);
+        }
         List<DecisionRequest.Option> options = new ArrayList<>();
         for (int i = 0; i < source.size(); i++) {
             T item = source.get(i);
@@ -368,6 +376,10 @@ public class RemotePlayerController extends PlayerController {
                     p == viewer ? toCardViews(p.getCardsIn(ZoneType.Hand)) : null,
                     toCardViews(p.getCardsIn(ZoneType.Battlefield)),
                     toCardViews(p.getCardsIn(ZoneType.Command)),
+                    toCardViews(p.getCardsIn(ZoneType.Graveyard)),
+                    toCardViews(p.getCardsIn(ZoneType.Exile)),
+                    p.getCardsIn(ZoneType.Library).size(),
+                    floatingManaOf(p),
                     stopAtPhasesForP));
         }
         List<String> log = new ArrayList<>();
@@ -387,6 +399,26 @@ public class RemotePlayerController extends PlayerController {
                 playerViews,
                 toCardViews(g.getStackZone().getCards()),
                 log.subList(logStart, log.size()));
+    }
+
+    private static final Map<String, Byte> MANA_COLOR_CODES = Map.of(
+            "W", forge.card.MagicColor.WHITE,
+            "U", forge.card.MagicColor.BLUE,
+            "B", forge.card.MagicColor.BLACK,
+            "R", forge.card.MagicColor.RED,
+            "G", forge.card.MagicColor.GREEN,
+            "C", forge.card.MagicColor.COLORLESS);
+
+    private Map<String, Integer> floatingManaOf(Player p) {
+        Map<String, Integer> result = new java.util.LinkedHashMap<>();
+        forge.game.mana.ManaPool pool = p.getManaPool();
+        for (Map.Entry<String, Byte> e : MANA_COLOR_CODES.entrySet()) {
+            int amount = pool.getAmountOfColor(e.getValue());
+            if (amount > 0) {
+                result.put(e.getKey(), amount);
+            }
+        }
+        return result;
     }
 
     private List<CardStateView> toCardViews(Iterable<Card> cards) {
@@ -434,7 +466,9 @@ public class RemotePlayerController extends PlayerController {
                     attacking,
                     attackingTarget,
                     blockingAttacker,
-                    !c.getManaAbilities().isEmpty()));
+                    !c.getManaAbilities().isEmpty(),
+                    c.isRoom() ? c.getUnlockedRoomNames() : new ArrayList<>(),
+                    c.isRoom() ? c.getLockedRoomNames() : new ArrayList<>()));
         }
         return views;
     }
@@ -486,7 +520,15 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public SpellAbility getAbilityToPlay(Card hostCard, List<SpellAbility> abilities, ITriggerEvent triggerEvent) {
-        return pickOne(abilities);
+        // Picks between alternative ways to play the same card (e.g. normal
+        // cost vs. flashback/adventure) - was random, so an Adventure card
+        // could get cast for its alternative mode without the player
+        // choosing that.
+        if (abilities.size() <= 1) {
+            return abilities.isEmpty() ? null : abilities.get(0);
+        }
+        List<SpellAbility> chosen = chooseFromList("Choose how to play " + hostCard.getName(), abilities, 1, 1, SpellAbility::toString, null);
+        return chosen.isEmpty() ? abilities.get(0) : chosen.get(0);
     }
 
     @Override
@@ -514,12 +556,28 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public boolean playTrigger(Card host, WrappedAbility wrapperAbility, boolean isMandatory) {
-        return isMandatory || randomBoolean();
+        // Gates *static* triggers (resolve immediately, not via the stack) -
+        // this is the actual path Miracle's "Drawn" trigger takes (it's
+        // declared Static$ True). Mirrors PlayerControllerHuman exactly:
+        // hand it to the same shared no-stack resolution routine, which
+        // internally re-checks the optional decider (WrappedAbility.resolve
+        // -> confirmTrigger) before doing anything - asking here ourselves
+        // would either duplicate that prompt or skip it. Was a coin flip,
+        // so the reveal-and-offer-to-cast sequence often silently never
+        // even started.
+        return safely(() -> forge.game.player.PlaySpellAbility.playSpellAbilityNoStack(this, player, wrapperAbility), false);
     }
 
     @Override
     public boolean playSaFromPlayEffect(SpellAbility tgtSA) {
-        return randomBoolean();
+        // Not a yes/no decision - this is the actual "execute the chosen
+        // play" hook (PlayEffect.java's confirmAction already asked whether
+        // to play it). Was a coin flip, so even after confirming "yes" via
+        // that earlier prompt, the spell often never actually got cast
+        // (e.g. Miracle's mana-payment step never ran).
+        boolean result = safely(() -> forge.game.player.PlaySpellAbility.playSpellAbility(this, player, tgtSA), false);
+        pushSpectatorUpdate();
+        return result;
     }
 
     @Override
@@ -561,7 +619,10 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public Integer announceRequirements(SpellAbility ability, int min, int max, String announce) {
-        return min;
+        // Backs X-cost announcement ("announce" is typically "X") - was
+        // hardcoded to min (almost always 0), so every X spell was always
+        // cast for X=0 regardless of available mana.
+        return chooseNumber(ability, announce != null ? "Choose a value for " + announce : "Choose a value", min, max);
     }
 
     @Override
@@ -571,7 +632,32 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public boolean chooseTargetsFor(SpellAbility currentAbility) {
-        return withDelegate(() -> delegate.chooseTargetsFor(currentAbility), false);
+        // Real target selection (e.g. "create a token that's a copy of
+        // another target permanent you control") - this is the targeting
+        // step every targeted spell/triggered ability goes through, not a
+        // rare edge case. Was routed through the embedded AI delegate, so
+        // the AI silently picked targets instead of asking - e.g.
+        // Extravagant Replication's upkeep trigger auto-targeted.
+        if (!currentAbility.usesTargeting()) {
+            return true;
+        }
+        forge.game.spellability.TargetRestrictions tr = currentAbility.getTargetRestrictions();
+        Card host = currentAbility.getHostCard();
+        int min = tr.getMinTargets(host, currentAbility);
+        int max = tr.getMaxTargets(host, currentAbility);
+        List<GameObject> candidates = new ArrayList<>(tr.getAllCandidates(currentAbility));
+        if (candidates.isEmpty()) {
+            return min == 0;
+        }
+        List<GameObject> chosen = chooseFromList(currentAbility.getStackDescription(), candidates, min, Math.max(min, Math.min(max, candidates.size())),
+                GameObject::toString, RemotePlayerController::cardIdOf);
+        if (chosen.size() < min) {
+            return false;
+        }
+        for (GameObject o : chosen) {
+            currentAbility.getTargets().add(o);
+        }
+        return true;
     }
 
     @Override
@@ -616,27 +702,34 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public List<SpellAbility> chooseSpellAbilitiesForEffect(List<SpellAbility> spells, SpellAbility sa, String title, int num, Map<String, Object> params) {
-        return pickN(spells, num);
+        return chooseFromList(title != null ? title : "Choose", spells, 0, num, SpellAbility::toString, null);
     }
 
     @Override
     public SpellAbility chooseSingleSpellForEffect(List<SpellAbility> spells, SpellAbility sa, String title, Map<String, Object> params) {
-        return pickOne(spells);
+        // Backs modal "choose one -" effects like Phenomenon Investigators'
+        // Believe/Doubt - was a random pick, so mode choice was never
+        // actually up to the player.
+        List<SpellAbility> chosen = chooseFromList(title != null ? title : "Choose one", spells, 1, 1, SpellAbility::toString, null);
+        return chosen.isEmpty() ? null : chosen.get(0);
     }
 
     @Override
     public boolean confirmBidAction(SpellAbility sa, PlayerActionConfirmMode bidlife, String string, int bid, Player winner) {
-        return randomBoolean();
+        DecisionResponse resp = ask("CONFIRM", string, null);
+        return resp.booleanValue != null ? resp.booleanValue : false;
     }
 
     @Override
     public boolean confirmReplacementEffect(ReplacementEffect replacementEffect, SpellAbility effectSA, GameEntity affected, String question) {
-        return randomBoolean();
+        DecisionResponse resp = ask("CONFIRM", question, null);
+        return resp.booleanValue != null ? resp.booleanValue : false;
     }
 
     @Override
     public boolean confirmStaticApplication(Card hostCard, PlayerActionConfirmMode mode, String message, String logic) {
-        return randomBoolean();
+        DecisionResponse resp = ask("CONFIRM", message, null);
+        return resp.booleanValue != null ? resp.booleanValue : false;
     }
 
     @Override
@@ -654,12 +747,12 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public List<Card> exertAttackers(List<Card> attackers) {
-        return new ArrayList<>();
+        return chooseFromList("Choose attackers to exert", attackers, 0, attackers.size(), Card::getName, RemotePlayerController::cardIdOf);
     }
 
     @Override
     public List<Card> enlistAttackers(List<Card> attackers) {
-        return new ArrayList<>();
+        return chooseFromList("Choose creatures to enlist", attackers, 0, attackers.size(), Card::getName, RemotePlayerController::cardIdOf);
     }
 
     @Override
@@ -699,17 +792,39 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public CardCollection orderBlockers(Card attacker, CardCollection blockers) {
-        return blockers;
+        // Damage assignment order among multiple blockers on the same
+        // attacker - was left in original (engine) order, so it was never
+        // actually up to the attacking player even when it mattered (e.g.
+        // assigning lethal to a deathtouch blocker first).
+        return orderCards("Order blockers of " + attacker.getName() + " (damage assignment order)", blockers);
     }
 
     @Override
     public CardCollection orderBlocker(Card attacker, Card blocker, CardCollection oldBlockers) {
-        return oldBlockers;
+        CardCollection all = new CardCollection(oldBlockers);
+        all.add(blocker);
+        return orderCards("Order blockers of " + attacker.getName() + " (damage assignment order)", all);
     }
 
     @Override
     public CardCollection orderAttackers(Card blocker, CardCollection attackers) {
-        return attackers;
+        return orderCards("Order attackers blocked by " + blocker.getName() + " (damage assignment order)", attackers);
+    }
+
+    private CardCollection orderCards(String prompt, CardCollection cards) {
+        if (cards.size() <= 1) {
+            return cards;
+        }
+        List<Card> remaining = new ArrayList<>(cards);
+        List<Card> ordered = new ArrayList<>();
+        while (!remaining.isEmpty()) {
+            String stepPrompt = prompt + " - choose position " + (ordered.size() + 1) + " of " + cards.size();
+            List<Card> pick = chooseFromList(stepPrompt, remaining, 1, 1, Card::getName, c -> String.valueOf(c.getId()));
+            Card chosen = pick.isEmpty() ? remaining.get(0) : pick.get(0);
+            ordered.add(chosen);
+            remaining.remove(chosen);
+        }
+        return new CardCollection(ordered);
     }
 
     @Override
@@ -729,16 +844,19 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForScry(CardCollection topN) {
-        // GameAction.scry() reverses+replays toTop, so cards we don't move
-        // out keep their original relative order automatically - we only
-        // need to ask which ones go to the bottom.
+        // GameAction.scry() reverses+replays toTop one at a time, so
+        // whatever order we return it in becomes the actual top-to-bottom
+        // order of the library - we need to both ask which cards leave AND
+        // (if more than one stays) ask what order the rest go back in,
+        // instead of silently keeping their pre-scry order.
         List<Card> toBottom = chooseFromList("Scry " + topN.size() + " - choose cards to put on the BOTTOM of your library",
                 new ArrayList<>(topN), 0, topN.size(), Card::toString, RemotePlayerController::cardIdOf);
-        CardCollection top = new CardCollection();
+        CardCollection keep = new CardCollection();
         CardCollection bottom = new CardCollection();
         for (Card c : topN) {
-            (toBottom.contains(c) ? bottom : top).add(c);
+            (toBottom.contains(c) ? bottom : keep).add(c);
         }
+        CardCollection top = orderCards("Order the cards staying on top (first = topmost)", keep);
         return new ImmutablePair<>(top, bottom);
     }
 
@@ -746,11 +864,12 @@ public class RemotePlayerController extends PlayerController {
     public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) {
         List<Card> toGrave = chooseFromList("Surveil " + topN.size() + " - choose cards to put into your graveyard",
                 new ArrayList<>(topN), 0, topN.size(), Card::toString, RemotePlayerController::cardIdOf);
-        CardCollection top = new CardCollection();
+        CardCollection keep = new CardCollection();
         CardCollection grave = new CardCollection();
         for (Card c : topN) {
-            (toGrave.contains(c) ? grave : top).add(c);
+            (toGrave.contains(c) ? grave : keep).add(c);
         }
+        CardCollection top = orderCards("Order the cards staying on top (first = topmost)", keep);
         return new ImmutablePair<>(top, grave);
     }
 
@@ -787,17 +906,20 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public CardCollectionView chooseCardsToDiscardUnlessType(int min, CardCollectionView hand, String[] unlessTypes, SpellAbility sa) {
-        return new CardCollection(pickN(hand, min));
+        return new CardCollection(chooseFromList("Choose cards to discard", new ArrayList<>(hand), min, min,
+                Card::toString, RemotePlayerController::cardIdOf));
     }
 
     @Override
     public CardCollection chooseCardsToDiscardToMaximumHandSize(int numDiscard) {
-        return new CardCollection(pickN(player.getCardsIn(ZoneType.Hand), numDiscard));
+        return new CardCollection(chooseFromList("Discard down to maximum hand size",
+                new ArrayList<>(player.getCardsIn(ZoneType.Hand)), numDiscard, numDiscard, Card::toString, RemotePlayerController::cardIdOf));
     }
 
     @Override
     public CardCollectionView chooseCardsToDelve(int genericAmount, CardCollection grave) {
-        return new CardCollection();
+        return new CardCollection(chooseFromList("Delve - choose up to " + genericAmount + " cards to exile from your graveyard",
+                new ArrayList<>(grave), 0, Math.min(genericAmount, grave.size()), Card::toString, RemotePlayerController::cardIdOf));
     }
 
     @Override
@@ -812,7 +934,8 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public CardCollectionView chooseCardsToRevealFromHand(int min, int max, CardCollectionView valid) {
-        return new CardCollection(pickN(valid, min));
+        return new CardCollection(chooseFromList("Choose cards to reveal", new ArrayList<>(valid), min, max,
+                Card::toString, RemotePlayerController::cardIdOf));
     }
 
     @Override
@@ -827,12 +950,14 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public PlayerZone chooseStartingHand(List<PlayerZone> zones) {
-        return pickOne(zones);
+        List<PlayerZone> chosen = chooseFromList("Choose your starting hand", zones, 1, 1, PlayerZone::toString, null);
+        return chosen.isEmpty() ? pickOne(zones) : chosen.get(0);
     }
 
     @Override
     public Mana chooseManaFromPool(List<Mana> manaChoices) {
-        return pickOne(manaChoices);
+        List<Mana> chosen = chooseFromList("Choose which floating mana to spend", manaChoices, 1, 1, Mana::toString, null);
+        return chosen.isEmpty() ? pickOne(manaChoices) : chosen.get(0);
     }
 
     @Override
@@ -890,12 +1015,14 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public Object vote(SpellAbility sa, String prompt, List<Object> options, ListMultimap<Object, Player> votes, Player forPlayer, boolean optional) {
-        return (optional && randomBoolean()) ? null : pickOne(options);
+        List<Object> chosen = chooseFromList(prompt != null ? prompt : "Vote", options, optional ? 0 : 1, 1, Object::toString, null);
+        return chosen.isEmpty() ? null : chosen.get(0);
     }
 
     @Override
     public CardCollectionView tuckCardsViaMulligan(CardCollectionView hand, int cardsToReturn) {
-        return new CardCollection(pickN(hand, cardsToReturn));
+        return new CardCollection(chooseFromList("Choose " + cardsToReturn + " card(s) to put back",
+                new ArrayList<>(hand), cardsToReturn, cardsToReturn, Card::toString, RemotePlayerController::cardIdOf));
     }
 
     @Override
@@ -967,32 +1094,45 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public int chooseNumberForCostReduction(SpellAbility sa, int min, int max) {
-        return min;
+        return chooseNumber(sa, "Choose a value to reduce the cost", min, max);
     }
 
     @Override
     public int chooseNumberForKeywordCost(SpellAbility sa, Cost cost, KeywordInterface keyword, String prompt, int max) {
-        return 0;
+        return chooseNumber(sa, prompt != null ? prompt : "Choose a value", 0, max);
     }
 
     @Override
     public int chooseNumber(SpellAbility sa, String title, int min, int max) {
-        return min + random.nextInt(Math.max(max - min + 1, 1));
+        if (min >= max) {
+            return min;
+        }
+        List<Integer> range = new ArrayList<>();
+        for (int i = min; i <= max; i++) {
+            range.add(i);
+        }
+        List<Integer> chosen = chooseFromList(title != null ? title : "Choose a number", range, 1, 1, String::valueOf, null);
+        return chosen.isEmpty() ? min : chosen.get(0);
     }
 
     @Override
     public int chooseNumber(SpellAbility sa, String title, List<Integer> values, Player relatedPlayer) {
-        Integer choice = pickOne(values);
-        return choice != null ? choice : 0;
+        List<Integer> chosen = chooseFromList(title != null ? title : "Choose a number", values, 1, 1, String::valueOf, null);
+        return chosen.isEmpty() ? (values.isEmpty() ? 0 : values.get(0)) : chosen.get(0);
     }
 
     @Override
     public boolean chooseBinary(SpellAbility sa, String question, BinaryChoiceType kindOfChoice, Boolean defaultChoice) {
-        return randomBoolean();
+        DecisionResponse resp = ask("CONFIRM", question, null);
+        return resp.booleanValue != null ? resp.booleanValue : (defaultChoice != null && defaultChoice);
     }
 
     @Override
     public boolean chooseFlipResult(SpellAbility sa, Player flipper, boolean call) {
+        // Only reached when multiple coins were flipped and came up split -
+        // this is a tie-break between two already-random outcomes, not a
+        // real decision for the player to make, so a coin flip of our own
+        // is the correct (not stubbed) behavior here.
         return randomBoolean();
     }
 
@@ -1027,7 +1167,12 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public ColorSet chooseColors(String message, SpellAbility sa, int min, int max, ColorSet options) {
-        List<forge.card.MagicColor.Color> picked = pickN(options.toEnumSet(), min);
+        // Distinct from the single-color chooseColor above (e.g. dual
+        // lands) - this backs "choose N colors" effects like Thriving
+        // lands' "choose a color other than X". Was a random pick, so the
+        // color choice was never actually up to the player.
+        List<forge.card.MagicColor.Color> picked = chooseFromList(message != null ? message : "Choose a color",
+                new ArrayList<>(options.toEnumSet()), min, max, Object::toString, null);
         return ColorSet.fromEnums(picked);
     }
 
@@ -1038,47 +1183,64 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public ICardFace chooseSingleCardFace(SpellAbility sa, List<ICardFace> faces, String message) {
-        return pickOne(faces);
+        List<ICardFace> chosen = chooseFromList(message != null ? message : "Choose a card face", faces, 1, 1, ICardFace::getName, null);
+        return chosen.isEmpty() ? null : chosen.get(0);
     }
 
     @Override
     public CardState chooseSingleCardState(SpellAbility sa, List<CardState> states, String message, Map<String, Object> params) {
-        return pickOne(states);
+        List<CardState> chosen = chooseFromList(message != null ? message : "Choose a state", states, 1, 1, CardState::toString, null);
+        return chosen.isEmpty() ? null : chosen.get(0);
     }
 
     @Override
     public boolean chooseCardsPile(SpellAbility sa, CardCollectionView pile1, CardCollectionView pile2, String faceUp) {
-        return randomBoolean();
+        List<DecisionRequest.Option> options = List.of(
+                new DecisionRequest.Option("0", "Pile 1 (" + pile1.size() + " cards)"),
+                new DecisionRequest.Option("1", "Pile 2 (" + pile2.size() + " cards)"));
+        DecisionResponse resp = ask("CONFIRM", "Choose a pile", options);
+        return resp.chosenIds != null && !resp.chosenIds.isEmpty() && resp.chosenIds.get(0).equals("0");
     }
 
     @Override
     public forge.game.card.CounterType chooseCounterType(List<forge.game.card.CounterType> options, SpellAbility sa, String prompt, Map<String, Object> params) {
-        return pickOne(options);
+        List<forge.game.card.CounterType> chosen = chooseFromList(prompt != null ? prompt : "Choose a counter type",
+                options, 1, 1, forge.game.card.CounterType::toString, null);
+        return chosen.isEmpty() ? null : chosen.get(0);
     }
 
     @Override
     public String chooseKeywordForPump(List<String> options, SpellAbility sa, String prompt, Card tgtCard) {
-        return pickOne(options);
+        List<String> chosen = chooseFromList(prompt != null ? prompt : "Choose a keyword", options, 1, 1, s -> s, null);
+        return chosen.isEmpty() ? null : chosen.get(0);
     }
 
     @Override
     public boolean confirmPayment(CostPart costPart, String string, SpellAbility sa) {
-        return randomBoolean();
+        DecisionResponse resp = ask("CONFIRM", string, null);
+        return resp.booleanValue != null ? resp.booleanValue : false;
     }
 
     @Override
     public ReplacementEffect chooseSingleReplacementEffect(List<ReplacementEffect> possibleReplacers) {
-        return pickOne(possibleReplacers);
+        // Called for every replacement event even when there's only one
+        // applicable effect (e.g. "enters tapped" on basically every dual
+        // land) - chooseFromList's min==max==size shortcut means that case
+        // doesn't actually prompt the player.
+        List<ReplacementEffect> chosen = chooseFromList("Choose a replacement effect", possibleReplacers, 1, 1, ReplacementEffect::toString, null);
+        return chosen.isEmpty() ? possibleReplacers.get(0) : chosen.get(0);
     }
 
     @Override
     public StaticAbility chooseSingleStaticAbility(List<StaticAbility> possibleReplacers) {
-        return pickOne(possibleReplacers);
+        List<StaticAbility> chosen = chooseFromList("Choose a static ability", possibleReplacers, 1, 1, StaticAbility::toString, null);
+        return chosen.isEmpty() ? possibleReplacers.get(0) : chosen.get(0);
     }
 
     @Override
     public String chooseProtectionType(SpellAbility sa, List<String> choices) {
-        return pickOne(choices);
+        List<String> chosen = chooseFromList("Choose protection from", choices, 1, 1, s -> s, null);
+        return chosen.isEmpty() ? null : chosen.get(0);
     }
 
     @Override
@@ -1098,7 +1260,10 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public List<forge.game.spellability.OptionalCostValue> chooseOptionalCosts(SpellAbility choosen, List<forge.game.spellability.OptionalCostValue> optionalCostValues) {
-        return new ArrayList<>();
+        // Backs additional/optional costs like kicker - was always "decline
+        // all", so kicker-style spells could never actually be kicked.
+        return chooseFromList("Choose optional costs for " + choosen.getHostCard().getName(),
+                optionalCostValues, 0, optionalCostValues.size(), forge.game.spellability.OptionalCostValue::toString, null);
     }
 
     @Override
@@ -1108,17 +1273,23 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public boolean payCostToPreventEffect(Cost cost, SpellAbility sa, boolean alreadyPaid, FCollectionView<Player> allPayers) {
-        return false;
+        if (alreadyPaid) {
+            return false;
+        }
+        DecisionResponse resp = ask("CONFIRM", "Pay " + cost + " to prevent " + sa.getHostCard().getName() + "'s effect?", null);
+        return resp.booleanValue != null ? resp.booleanValue : false;
     }
 
     @Override
     public boolean payCostDuringRoll(Cost cost, SpellAbility sa) {
-        return false;
+        DecisionResponse resp = ask("CONFIRM", "Pay " + cost + "?", null);
+        return resp.booleanValue != null ? resp.booleanValue : false;
     }
 
     @Override
     public boolean payCombatCost(Card card, Cost cost, SpellAbility sa, String prompt) {
-        return false;
+        DecisionResponse resp = ask("CONFIRM", prompt != null ? prompt : "Pay " + cost + "?", null);
+        return resp.booleanValue != null ? resp.booleanValue : false;
     }
 
     // ---- Mana payment: mirrors Forge's own InputPayMana - tap mana sources
@@ -1231,18 +1402,22 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public CardCollectionView chooseCardsForCost(CardCollectionView optionList, SpellAbility sa, CostPartWithList cpl, int amount, boolean isOptional, String prompt) {
-        return new CardCollection(pickN(optionList, isOptional ? 0 : amount));
+        return new CardCollection(chooseFromList(prompt != null ? prompt : "Choose cards", new ArrayList<>(optionList),
+                isOptional ? 0 : amount, amount, Card::toString, RemotePlayerController::cardIdOf));
     }
 
     @Override
     public String chooseCardName(SpellAbility sa, Predicate<ICardFace> cpp, String valid, String message) {
+        // Naming any card in the database (e.g. Meddling Mage-style effects)
+        // would need a searchable card list UI we don't have yet - leave
+        // unimplemented rather than fake a choice from an unfiltered set.
         return null;
     }
 
     @Override
     public String chooseCardName(SpellAbility sa, List<ICardFace> faces, String message) {
-        ICardFace choice = pickOne(faces);
-        return choice != null ? choice.getName() : null;
+        List<ICardFace> chosen = chooseFromList(message != null ? message : "Choose a card name", faces, 1, 1, ICardFace::getName, null);
+        return chosen.isEmpty() ? null : chosen.get(0).getName();
     }
 
     @Override
