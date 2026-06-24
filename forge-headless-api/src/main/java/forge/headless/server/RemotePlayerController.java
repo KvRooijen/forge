@@ -233,7 +233,10 @@ public class RemotePlayerController extends PlayerController {
         }
     }
 
-    private DecisionResponse ask(String type, String prompt, List<DecisionRequest.Option> options) {
+    // Package-private (not private) so RemoteCostDecision, which needs the
+    // same primitives to implement getCostDecisionMaker, can reuse them
+    // directly instead of duplicating the request/response plumbing.
+    DecisionResponse ask(String type, String prompt, List<DecisionRequest.Option> options) {
         return channel.ask(new DecisionRequest(UUID.randomUUID().toString(), type, prompt, options, safeBuildStateView(player)));
     }
 
@@ -253,7 +256,7 @@ public class RemotePlayerController extends PlayerController {
      * click-to-toggle on the card itself when cardIdFn is given) covers all
      * of them instead of each picking randomly.
      */
-    private <T> List<T> chooseFromList(String prompt, List<T> source, int min, int max,
+    <T> List<T> chooseFromList(String prompt, List<T> source, int min, int max,
             java.util.function.Function<T, String> labelFn, java.util.function.Function<T, String> cardIdFn) {
         if (source.isEmpty()) {
             return new ArrayList<>();
@@ -297,7 +300,7 @@ public class RemotePlayerController extends PlayerController {
      * checklist just silently has zero clickable targets. Those cases
      * fall back to the plain text checklist instead.
      */
-    private static String cardIdOf(Object o) {
+    static String cardIdOf(Object o) {
         if (!(o instanceof Card c)) {
             return null;
         }
@@ -647,19 +650,66 @@ public class RemotePlayerController extends PlayerController {
         return new ArrayList<>();
     }
 
+    /** Shared by assignCombatDamage/divideShield/specifyManaCombo: split a
+     * fixed total among several recipients via repeated single-amount asks
+     * (assign-to-first-recipient-until-they're-full, then move to the
+     * next), rather than a true simultaneous-distribution UI. Doesn't
+     * enforce MTG's "lethal first, in order" rule for combat damage - real
+     * Forge's own GUI widget doesn't enforce that purely client-side
+     * either (the rule is advisory at this layer); this trades strict
+     * legality for a working interactive flow instead of the AI silently
+     * deciding for the human. */
+    private <T> Map<T, Integer> distributeAmount(String prompt, List<T> recipients, int total, java.util.function.Function<T, String> labelFn) {
+        Map<T, Integer> result = new java.util.LinkedHashMap<>();
+        if (recipients.isEmpty() || total <= 0) {
+            return result;
+        }
+        List<T> remaining = new ArrayList<>(recipients);
+        int left = total;
+        while (left > 0 && !remaining.isEmpty()) {
+            T recipient = remaining.remove(0);
+            int amount = chooseNumber(null, prompt + " - assign how much to " + labelFn.apply(recipient) + "? (" + left + " remaining)", 0, left);
+            if (amount > 0) {
+                result.put(recipient, amount);
+                left -= amount;
+            }
+        }
+        return result;
+    }
+
     @Override
     public Map<Card, Integer> assignCombatDamage(Card attacker, CardCollectionView blockers, CardCollectionView remaining, int damageDealt, GameEntity defender, boolean overrideOrder) {
-        return withDelegate(() -> delegate.assignCombatDamage(attacker, blockers, remaining, damageDealt, defender, overrideOrder), new java.util.HashMap<>());
+        List<Card> recipients = new ArrayList<>(blockers);
+        Map<Card, Integer> result = distributeAmount("Assign " + attacker.getName() + "'s combat damage", recipients, damageDealt, Card::getName);
+        int assigned = result.values().stream().mapToInt(Integer::intValue).sum();
+        if (defender != null && assigned < damageDealt) {
+            result.put(null, damageDealt - assigned);
+        }
+        return result;
     }
 
     @Override
     public Map<GameEntity, Integer> divideShield(Card effectSource, Map<GameEntity, Integer> affected, int shieldAmount) {
-        return withDelegate(() -> delegate.divideShield(effectSource, affected, shieldAmount), new java.util.HashMap<>());
+        List<GameEntity> recipients = new ArrayList<>(affected.keySet());
+        return distributeAmount("Divide " + effectSource.getName() + "'s shield", recipients, shieldAmount, GameEntity::toString);
     }
 
     @Override
     public Map<Byte, Integer> specifyManaCombo(SpellAbility sa, ColorSet colorSet, int manaAmount, boolean different) {
-        return withDelegate(() -> delegate.specifyManaCombo(sa, colorSet, manaAmount, different), new java.util.HashMap<>());
+        List<Byte> colors = new ArrayList<>();
+        for (byte color : forge.card.MagicColor.WUBRG) {
+            if (colorSet.hasAnyColor(color)) {
+                colors.add(color);
+            }
+        }
+        Map<Byte, Integer> result = distributeAmount("Specify mana combo for " + sa.getHostCard().getName(), colors, manaAmount,
+                c -> forge.card.MagicColor.toLongString(c));
+        if (different) {
+            // "different" means at most 1 of each color - distributeAmount
+            // doesn't enforce that cap, so clamp it here.
+            result.replaceAll((k, v) -> Math.min(v, 1));
+        }
+        return result;
     }
 
     @Override
@@ -684,7 +734,37 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public TargetChoices chooseNewTargetsFor(SpellAbility ability, Predicate<GameObject> filter, boolean optional) {
-        return withDelegate(() -> delegate.chooseNewTargetsFor(ability, filter, optional), null);
+        // Redirect/retarget effects (e.g. choosing a new target for a copy
+        // of a spell) - same shortcut risk as chooseTargetsFor above: this
+        // used to silently let the AI pick instead of asking.
+        SpellAbility sa = ability.isWrapper() ? ((WrappedAbility) ability).getWrappedAbility() : ability;
+        if (!sa.usesTargeting()) {
+            return null;
+        }
+        TargetChoices oldTarget = sa.getTargets();
+        forge.game.spellability.TargetRestrictions tr = sa.getTargetRestrictions();
+        Card host = sa.getHostCard();
+        List<GameObject> candidates = new ArrayList<>(tr.getAllCandidates(sa));
+        if (filter != null) {
+            candidates.removeIf(o -> !filter.test(o));
+        }
+        int min = optional ? 0 : oldTarget.size();
+        int max = Math.max(min, Math.min(tr.getMaxTargets(host, sa), candidates.size()));
+        sa.clearTargets();
+        if (candidates.isEmpty() && min > 0) {
+            sa.setTargets(oldTarget);
+            return null;
+        }
+        List<GameObject> chosen = chooseFromList("Choose new targets for " + sa.getStackDescription(), candidates, min, max,
+                GameObject::toString, RemotePlayerController::cardIdOf);
+        if (chosen.size() < min) {
+            sa.setTargets(oldTarget);
+            return null;
+        }
+        for (GameObject o : chosen) {
+            sa.getTargets().add(o);
+        }
+        return sa.getTargets();
     }
 
     @Override
@@ -1519,7 +1599,12 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public CostDecisionMakerBase getCostDecisionMaker(Player player, SpellAbility ability, boolean effect, String prompt) {
-        return withDelegate(() -> delegate.getCostDecisionMaker(player, ability, effect, prompt), null);
+        // The single highest-impact of the remaining embedded-delegate
+        // gaps: this is invoked by payment.payCost(...) for *every* cast/
+        // activation with a non-mana cost component (sacrifice, discard,
+        // exile, choose-a-color, etc.) - not a rare edge case. Was
+        // silently letting the AI decide these for the human seat too.
+        return new RemoteCostDecision(this, player, ability, effect, prompt);
     }
 
     @Override
