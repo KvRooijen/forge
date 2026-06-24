@@ -20,6 +20,11 @@ public class PlayerStateView {
      * real game - only the count is sent, never the cards, so peeking at
      * upcoming draws can't affect how you play. */
     public int libraryCount;
+    /** Only populated when this player currently has a "may look at the
+     * top card of your library" grant (e.g. One with the Multiverse) -
+     * null otherwise, since library contents are normally hidden even
+     * from their owner. */
+    public CardStateView topOfLibrary;
     /** Floating mana currently in this player's pool, keyed by color code
      * (W/U/B/R/G/C) - empties at the end of every phase/step per the real
      * rules, but with no visual indicator that was indistinguishable from
@@ -34,7 +39,7 @@ public class PlayerStateView {
 
     public PlayerStateView(String name, int life, boolean isYou, boolean isActiveTurn, int handCount,
             List<CardStateView> hand, List<CardStateView> battlefield, List<CardStateView> commandZone,
-            List<CardStateView> graveyard, List<CardStateView> exile, int libraryCount,
+            List<CardStateView> graveyard, List<CardStateView> exile, int libraryCount, CardStateView topOfLibrary,
             Map<String, Integer> floatingMana, List<String> stopAtPhases) {
         this.name = name;
         this.life = life;
@@ -47,6 +52,7 @@ public class PlayerStateView {
         this.graveyard = graveyard;
         this.exile = exile;
         this.libraryCount = libraryCount;
+        this.topOfLibrary = topOfLibrary;
         this.floatingMana = floatingMana;
         this.stopAtPhases = stopAtPhases;
     }

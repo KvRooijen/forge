@@ -388,6 +388,7 @@ public class RemotePlayerController extends PlayerController {
                     toCardViews(p.getCardsIn(ZoneType.Graveyard)),
                     toCardViews(p.getCardsIn(ZoneType.Exile)),
                     p.getCardsIn(ZoneType.Library).size(),
+                    topOfLibraryViewFor(p),
                     floatingManaOf(p),
                     stopAtPhasesForP));
         }
@@ -413,8 +414,36 @@ public class RemotePlayerController extends PlayerController {
                 phase != null ? phase.name() : "",
                 active != null ? active.getName() : null,
                 playerViews,
-                toCardViews(g.getStackZone().getCards()),
+                stackItemViews(g),
                 log);
+    }
+
+    private List<GameStateView.StackItemView> stackItemViews(Game g) {
+        List<GameStateView.StackItemView> result = new ArrayList<>();
+        // MagicStack.iterator() walks the underlying deque head-first, and
+        // items are pushed via addFirst - so plain iteration order is
+        // already top-of-stack (most recently added, next to resolve) first.
+        for (forge.game.spellability.SpellAbilityStackInstance si : g.getStack()) {
+            Card source = si.getSourceCard();
+            result.add(new GameStateView.StackItemView(
+                    source != null ? toCardView(source) : null,
+                    si.getStackDescription()));
+        }
+        return result;
+    }
+
+    /** Surfaces the top card of a player's library only when a static
+     * grant (e.g. One with the Multiverse's "you may look at the top card
+     * of your library any time") actually allows it - Card.mayPlayerLook
+     * is the same check the engine itself uses for that grant, so this
+     * can't leak a peek the player wouldn't legitimately have. */
+    private CardStateView topOfLibraryViewFor(Player p) {
+        CardCollection top = p.getTopXCardsFromLibrary(1);
+        if (top.isEmpty()) {
+            return null;
+        }
+        Card topCard = top.get(0);
+        return topCard.mayPlayerLook(p) ? toCardView(topCard) : null;
     }
 
     private static final Map<String, Byte> MANA_COLOR_CODES = Map.of(
@@ -498,8 +527,19 @@ public class RemotePlayerController extends PlayerController {
                 attackingTarget,
                 blockingAttacker,
                 !c.getManaAbilities().isEmpty(),
-                c.isRoom() ? c.getUnlockedRoomNames() : new ArrayList<>(),
-                c.isRoom() ? c.getLockedRoomNames() : new ArrayList<>());
+                c.isRoom() ? roomDoorOf(c, forge.card.CardStateName.LeftSplit) : null,
+                c.isRoom() ? roomDoorOf(c, forge.card.CardStateName.RightSplit) : null);
+    }
+
+    /** CardStateName.LeftSplit/RightSplit are the two fixed door slots a
+     * Room card can have - Card.getUnlockedRoomNames/getLockedRoomNames
+     * iterate a Set instead, so they can't be trusted to come back in a
+     * stable left-then-right order for side-specific UI placement. */
+    private CardStateView.RoomDoor roomDoorOf(Card c, forge.card.CardStateName side) {
+        if (!c.hasState(side)) {
+            return null;
+        }
+        return new CardStateView.RoomDoor(c.getState(side).getName(), !c.getUnlockedRooms().contains(side));
     }
 
     // ---- Decisions wired to the remote channel ----
@@ -729,6 +769,26 @@ public class RemotePlayerController extends PlayerController {
         // Backs X-cost announcement ("announce" is typically "X") - was
         // hardcoded to min (almost always 0), so every X spell was always
         // cast for X=0 regardless of available mana.
+        //
+        // For cards with no explicit XMax (the common case - X is normally
+        // only bounded by available mana, computed dynamically), max comes
+        // in as Integer.MAX_VALUE from AbilityUtils.getAnnouncementBounds.
+        // chooseNumber's int-range overload below materializes every value
+        // from min to max as a checklist, so an unclamped MAX_VALUE hangs
+        // the game trying to build a multi-billion-entry list (found via
+        // Entreat the Angels - any X-cost card with no XMax would hit this
+        // the same way). Mirror PlayerControllerHuman's real fix: clamp by
+        // how much X the player could actually pay for.
+        Cost cost = ability.getPayCosts();
+        if ("X".equals(announce) && cost != null) {
+            Integer costX = cost.getMaxForNonManaX(ability, player, false);
+            if (costX != null) {
+                max = Math.min(max, costX);
+            }
+        }
+        if (min > max) {
+            return null;
+        }
         return chooseNumber(ability, announce != null ? "Choose a value for " + announce : "Choose a value", min, max);
     }
 
@@ -744,25 +804,35 @@ public class RemotePlayerController extends PlayerController {
         TargetChoices oldTarget = sa.getTargets();
         forge.game.spellability.TargetRestrictions tr = sa.getTargetRestrictions();
         Card host = sa.getHostCard();
-        List<GameObject> candidates = new ArrayList<>(tr.getAllCandidates(sa));
-        if (filter != null) {
-            candidates.removeIf(o -> !filter.test(o));
-        }
         int min = optional ? 0 : oldTarget.size();
-        int max = Math.max(min, Math.min(tr.getMaxTargets(host, sa), candidates.size()));
+        int max = tr.getMaxTargets(host, sa);
         sa.clearTargets();
-        if (candidates.isEmpty() && min > 0) {
+        // Same incremental pick-then-recompute pattern as chooseTargetsFor
+        // (see its comment) - candidates must be re-derived after each
+        // pick so relational constraints between the new targets are
+        // actually enforced, not just checked against the old targets.
+        int picked = 0;
+        while (picked < max) {
+            List<GameObject> candidates = new ArrayList<>(tr.getAllCandidates(sa));
+            candidates.removeAll(sa.getTargets());
+            if (filter != null) {
+                candidates.removeIf(o -> !filter.test(o));
+            }
+            if (candidates.isEmpty()) {
+                break;
+            }
+            int pickMin = picked < min ? 1 : 0;
+            List<GameObject> pick = chooseFromList("Choose new targets for " + sa.getStackDescription(), candidates, pickMin, 1,
+                    GameObject::toString, RemotePlayerController::cardIdOf);
+            if (pick.isEmpty()) {
+                break;
+            }
+            sa.getTargets().add(pick.get(0));
+            picked++;
+        }
+        if (picked < min) {
             sa.setTargets(oldTarget);
             return null;
-        }
-        List<GameObject> chosen = chooseFromList("Choose new targets for " + sa.getStackDescription(), candidates, min, max,
-                GameObject::toString, RemotePlayerController::cardIdOf);
-        if (chosen.size() < min) {
-            sa.setTargets(oldTarget);
-            return null;
-        }
-        for (GameObject o : chosen) {
-            sa.getTargets().add(o);
         }
         return sa.getTargets();
     }
@@ -782,19 +852,37 @@ public class RemotePlayerController extends PlayerController {
         Card host = currentAbility.getHostCard();
         int min = tr.getMinTargets(host, currentAbility);
         int max = tr.getMaxTargets(host, currentAbility);
-        List<GameObject> candidates = new ArrayList<>(tr.getAllCandidates(currentAbility));
-        if (candidates.isEmpty()) {
+        if (max == 0) {
             return min == 0;
         }
-        List<GameObject> chosen = chooseFromList(currentAbility.getStackDescription(), candidates, min, Math.max(min, Math.min(max, candidates.size())),
-                GameObject::toString, RemotePlayerController::cardIdOf);
-        if (chosen.size() < min) {
-            return false;
+        // Pick targets one at a time and re-derive candidates after each
+        // pick (rather than computing the full candidate list once and
+        // letting the player bulk-select up to max from it) - canTarget
+        // checks relational constraints between targets ALREADY chosen
+        // for this ability (TargetsForEachPlayer, DifferentControllers,
+        // DifferentNames, WithSameCreatureType, etc.), so getAllCandidates
+        // only returns a fully unconstrained list on the very first pick.
+        // A bulk multi-select from that first list could let two targets
+        // through that the engine would never have allowed one-at-a-time -
+        // e.g. Bronzebeak Foragers ("up to one target nonland permanent
+        // EACH opponent controls") could double-target one opponent.
+        int picked = 0;
+        while (picked < max) {
+            List<GameObject> candidates = new ArrayList<>(tr.getAllCandidates(currentAbility));
+            candidates.removeAll(currentAbility.getTargets());
+            if (candidates.isEmpty()) {
+                break;
+            }
+            int pickMin = picked < min ? 1 : 0;
+            List<GameObject> pick = chooseFromList(currentAbility.getStackDescription(), candidates, pickMin, 1,
+                    GameObject::toString, RemotePlayerController::cardIdOf);
+            if (pick.isEmpty()) {
+                break;
+            }
+            currentAbility.getTargets().add(pick.get(0));
+            picked++;
         }
-        for (GameObject o : chosen) {
-            currentAbility.getTargets().add(o);
-        }
-        return true;
+        return picked >= min;
     }
 
     @Override
@@ -1240,6 +1328,13 @@ public class RemotePlayerController extends PlayerController {
         for (Card c : player.getCardsIn(ZoneType.Exile)) {
             legalPlays.addAll(c.getAllPossibleAbilities(player, true));
         }
+        // Same idea for "play from the top of your library" grants (Verge
+        // Rangers, One with the Multiverse) - getAllPossibleAbilities
+        // returns nothing for the rest of the library (face-down, no
+        // grant), so this doesn't flood the menu with the whole deck.
+        for (Card c : player.getCardsIn(ZoneType.Library)) {
+            legalPlays.addAll(c.getAllPossibleAbilities(player, true));
+        }
         if (legalPlays.isEmpty()) {
             return null;
         }
@@ -1280,12 +1375,26 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public List<AbilitySub> chooseModeForAbility(SpellAbility sa, List<AbilitySub> possible, int min, int num, boolean allowRepeat) {
-        // allowRepeat (choosing the same mode more than once) isn't modeled
-        // by chooseFromList yet, since none of the cards we've audited so
-        // far need it - revisit if that turns out to matter.
-        int count = Math.min(num, possible.size());
-        return chooseFromList("Choose a mode", possible, Math.min(min, count), count,
-                AbilitySub::toString, null);
+        if (!allowRepeat) {
+            int count = Math.min(num, possible.size());
+            return chooseFromList("Choose a mode", possible, Math.min(min, count), count,
+                    AbilitySub::toString, null);
+        }
+        // Fiery Confluence-style "choose N modes, repeats allowed" - a
+        // single bulk multi-select over `possible` can't express picking
+        // the same entry twice, so ask one mode at a time instead, always
+        // offering the full list back each time.
+        List<AbilitySub> chosen = new ArrayList<>();
+        for (int i = 0; i < num; i++) {
+            int pickMin = chosen.size() < min ? 1 : 0;
+            List<AbilitySub> pick = chooseFromList("Choose a mode (" + (i + 1) + "/" + num + ")", possible,
+                    pickMin, 1, AbilitySub::toString, null);
+            if (pick.isEmpty()) {
+                break;
+            }
+            chosen.add(pick.get(0));
+        }
+        return chosen;
     }
 
     @Override
@@ -1303,6 +1412,11 @@ public class RemotePlayerController extends PlayerController {
         if (min >= max) {
             return min;
         }
+        // Defensive cap: this enumerates every value as a checklist option,
+        // unlike the real GUI's free-typed number box, so an uncapped caller
+        // (e.g. an X announcement with no XMax and no other clamp applied)
+        // would otherwise try to materialize a multi-billion-entry list.
+        max = Math.min(max, min + 200);
         List<Integer> range = new ArrayList<>();
         for (int i = min; i <= max; i++) {
             range.add(i);

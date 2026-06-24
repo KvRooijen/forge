@@ -1,6 +1,5 @@
 package forge.headless.protocol;
 
-import java.util.List;
 import java.util.Map;
 
 /**
@@ -27,10 +26,24 @@ public class CardStateView {
     /** Has at least one mana ability - lets the frontend group mana rocks
      * onto the same row as lands instead of with other artifacts. */
     public boolean producesMana;
-    /** Room cards (Duskmourn) have two "doors" - names of the door(s)
-     * currently unlocked / still locked, empty for non-Room cards. */
-    public List<String> unlockedRoomNames;
-    public List<String> lockedRoomNames;
+    /** Room cards (Duskmourn) have two "doors", left and right - null for
+     * non-Room cards. Side-specific (rather than the two unordered lists
+     * this used to be) so the frontend can put a big lock icon on the
+     * actual locked half instead of just listing door names in a corner. */
+    public RoomDoor leftDoor;
+    public RoomDoor rightDoor;
+
+    public static class RoomDoor {
+        public String name;
+        public boolean locked;
+
+        public RoomDoor() { }
+
+        public RoomDoor(String name, boolean locked) {
+            this.name = name;
+            this.locked = locked;
+        }
+    }
 
     public CardStateView() { }
 
@@ -38,7 +51,7 @@ public class CardStateView {
             Integer power, Integer toughness, boolean tapped, boolean isCommander,
             boolean sick, Map<String, Integer> counters, boolean attacking,
             String attackingTarget, String blockingAttacker, boolean producesMana,
-            List<String> unlockedRoomNames, List<String> lockedRoomNames) {
+            RoomDoor leftDoor, RoomDoor rightDoor) {
         this.id = id;
         this.name = name;
         this.manaCost = manaCost;
@@ -53,7 +66,7 @@ public class CardStateView {
         this.attackingTarget = attackingTarget;
         this.blockingAttacker = blockingAttacker;
         this.producesMana = producesMana;
-        this.unlockedRoomNames = unlockedRoomNames;
-        this.lockedRoomNames = lockedRoomNames;
+        this.leftDoor = leftDoor;
+        this.rightDoor = rightDoor;
     }
 }
