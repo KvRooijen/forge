@@ -16,6 +16,10 @@ public class DecisionRequest {
     /** Only meaningful for CHOOSE_LIST: how many of `options` must/may be picked. */
     public Integer min;
     public Integer max;
+    /** Only meaningful for DECLARE_BLOCKERS: one group per attacker, so the
+     * whole combat can be shown and answered in a single request instead of
+     * one CHOOSE_LIST per attacker in sequence. */
+    public List<Group> groups;
 
     public DecisionRequest() { }
 
@@ -63,6 +67,30 @@ public class DecisionRequest {
             this.label = label;
             this.cardId = cardId;
             this.card = card;
+        }
+    }
+
+    /** One attacker's worth of blocker candidates, within a DECLARE_BLOCKERS
+     * request that covers the whole combat in one round trip. */
+    public static class Group {
+        public String id;
+        public String prompt;
+        /** The attacking creature itself, so the frontend can show what's
+         * being blocked, not just a text label. */
+        public CardStateView attacker;
+        public List<Option> options;
+        public int min;
+        public int max;
+
+        public Group() { }
+
+        public Group(String id, String prompt, CardStateView attacker, List<Option> options, int min, int max) {
+            this.id = id;
+            this.prompt = prompt;
+            this.attacker = attacker;
+            this.options = options;
+            this.min = min;
+            this.max = max;
         }
     }
 }

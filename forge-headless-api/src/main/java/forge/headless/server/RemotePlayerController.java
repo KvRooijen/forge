@@ -825,23 +825,55 @@ public class RemotePlayerController extends PlayerController {
             pushSpectatorUpdate();
             return;
         }
+        // One combined request covering every attacker, instead of a
+        // separate CHOOSE_LIST prompt per attacker in sequence - lets the
+        // frontend show the whole combat (which creature attacks what,
+        // which blockers are legal for each) at once rather than stepping
+        // through attackers one by one with no visibility into the rest.
         CardCollection attackers = combat.getAttackersOf(defender);
-        java.util.Set<Card> alreadyBlocking = new java.util.HashSet<>();
+        List<DecisionRequest.Group> groups = new ArrayList<>();
+        Map<String, Card> attackerById = new java.util.LinkedHashMap<>();
+        Map<String, Card> blockerById = new java.util.LinkedHashMap<>();
         for (Card attacker : attackers) {
             List<Card> candidates = new ArrayList<>();
             for (Card blocker : defender.getCreaturesInPlay()) {
-                if (!alreadyBlocking.contains(blocker) && CombatUtil.canBlock(attacker, blocker, combat)) {
+                if (CombatUtil.canBlock(attacker, blocker, combat)) {
                     candidates.add(blocker);
                 }
             }
             if (candidates.isEmpty()) {
                 continue;
             }
-            List<Card> chosen = chooseFromList("Declare blockers for " + attacker.getName() + " (attacking you)",
-                    candidates, 0, candidates.size(), Card::getName, c -> String.valueOf(c.getId()));
-            for (Card blocker : chosen) {
-                combat.addBlocker(attacker, blocker);
-                alreadyBlocking.add(blocker);
+            String groupId = String.valueOf(attacker.getId());
+            attackerById.put(groupId, attacker);
+            List<DecisionRequest.Option> options = new ArrayList<>();
+            for (Card blocker : candidates) {
+                String optionId = String.valueOf(blocker.getId());
+                blockerById.put(optionId, blocker);
+                options.add(new DecisionRequest.Option(optionId, blocker.getName(), optionId, toCardView(blocker)));
+            }
+            groups.add(new DecisionRequest.Group(groupId, attacker.getName() + " (attacking you)",
+                    toCardView(attacker), options, 0, candidates.size()));
+        }
+        if (groups.isEmpty()) {
+            pushSpectatorUpdate();
+            return;
+        }
+        DecisionRequest req = new DecisionRequest(UUID.randomUUID().toString(), "DECLARE_BLOCKERS",
+                "Declare blockers", null, safeBuildStateView(player));
+        req.groups = groups;
+        DecisionResponse resp = channel.ask(req);
+        java.util.Set<Card> alreadyBlocking = new java.util.HashSet<>();
+        if (resp.groupChoices != null) {
+            for (DecisionRequest.Group g : groups) {
+                Card attacker = attackerById.get(g.id);
+                for (String optionId : resp.groupChoices.getOrDefault(g.id, List.of())) {
+                    Card blocker = blockerById.get(optionId);
+                    if (blocker != null && !alreadyBlocking.contains(blocker)) {
+                        combat.addBlocker(attacker, blocker);
+                        alreadyBlocking.add(blocker);
+                    }
+                }
             }
         }
         pushSpectatorUpdate();
@@ -963,8 +995,27 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public CardCollectionView chooseCardsToDiscardUnlessType(int min, CardCollectionView hand, String[] unlessTypes, SpellAbility sa) {
-        return new CardCollection(chooseFromList("Choose cards to discard", new ArrayList<>(hand), min, min,
-                Card::toString, RemotePlayerController::cardIdOf));
+        // e.g. Thirst for Meaning: "discard two cards unless you discard an
+        // enchantment card" - forcing exactly `min` cards every time (the
+        // old behavior here) never offered the cheaper alternative. Real
+        // rule: the player may instead submit just one card of unlessTypes
+        // and that alone satisfies it, regardless of `min`.
+        String typeLabel = String.join(" or ", unlessTypes).toLowerCase();
+        List<Card> chosen = new ArrayList<>(chooseFromList(
+                "Discard " + min + " cards, or just one " + typeLabel + " card instead",
+                new ArrayList<>(hand), 1, min, Card::toString, RemotePlayerController::cardIdOf));
+        boolean hasQualifying = chosen.stream().anyMatch(c -> c.isValid(unlessTypes, sa.getActivatingPlayer(), sa.getHostCard(), sa));
+        if (chosen.size() < min && !hasQualifying) {
+            for (Card c : hand) {
+                if (chosen.size() >= min) {
+                    break;
+                }
+                if (!chosen.contains(c)) {
+                    chosen.add(c);
+                }
+            }
+        }
+        return new CardCollection(chosen);
     }
 
     @Override
@@ -1100,6 +1151,13 @@ public class RemotePlayerController extends PlayerController {
             legalPlays.addAll(c.getAllPossibleAbilities(player, true));
         }
         for (Card c : player.getCardsIn(ZoneType.Command)) {
+            legalPlays.addAll(c.getAllPossibleAbilities(player, true));
+        }
+        // Cards granted "may play from exile" (Aminatou's Augury, impulse
+        // draw effects, etc.) sit here - getAllPossibleAbilities naturally
+        // returns nothing for the vast majority of exile cards (no grant,
+        // no legal way to cast them), so this doesn't flood the menu.
+        for (Card c : player.getCardsIn(ZoneType.Exile)) {
             legalPlays.addAll(c.getAllPossibleAbilities(player, true));
         }
         if (legalPlays.isEmpty()) {
@@ -1346,8 +1404,14 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public boolean payCombatCost(Card card, Cost cost, SpellAbility sa, String prompt) {
-        DecisionResponse resp = ask("CONFIRM", prompt != null ? prompt : "Pay " + cost + "?", null);
-        return resp.booleanValue != null ? resp.booleanValue : false;
+        // This used to just ask a yes/no CONFIRM and return that answer
+        // verbatim - meaning attackers facing a real cost (Sphere of
+        // Safety's "pay {X} or this creature can't attack you") got to
+        // attack for free as long as the answer was "yes", since nothing
+        // ever actually paid the cost. payCostDuringAbilityResolve runs
+        // the real cost-payment flow (including a PAY_MANA prompt for
+        // mana costs) and only returns true once the cost is actually paid.
+        return forge.game.player.PlaySpellAbility.payCostDuringAbilityResolve(this, player, cost, sa, prompt);
     }
 
     // ---- Mana payment: mirrors Forge's own InputPayMana - tap mana sources
