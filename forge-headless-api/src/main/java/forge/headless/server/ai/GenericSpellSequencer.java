@@ -12,30 +12,31 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Picks the best-VALUE affordable play, not the most-expensive one - in
- * bracket-2 Commander, developing your own board efficiently usually
- * matters more than interaction, and "always cast whatever costs the
- * most mana" doesn't actually optimize for that. Since the engine calls
- * this again after every successful cast (mana decreasing each time), the
- * natural effect of always taking the best efficiency-per-mana play is to
- * spend a turn's mana across several efficient plays rather than burning
- * it all on one expensive-but-unremarkable card.
+ * Plans the best-VALUE *subset* of currently-castable cards for the mana
+ * actually available right now, rather than greedily taking the best
+ * value-per-mana card one at a time. Greedy efficiency can strand a much
+ * better total turn: with 6 mana, a 2-cost card at efficiency 2.0 and a
+ * 5-cost card at efficiency 1.5 (value 4 and 7.5 respectively), greedy
+ * takes the 2-cost first, leaves 4 mana, and the 5-cost no longer fits -
+ * total value 4, when casting the 5-cost alone would have been 7.5. A 0/1
+ * knapsack (maximize total value, budget = mana available) finds the
+ * actual best combination instead.
  *
- * Value signals available from CardStateView (no oracle text, so nothing
- * deck-specific like "this draws cards" is detectable):
- *  - ramp/mana rocks (producesMana): weighted heavily early (low land
- *    count), tapering off once mana is no longer the bottleneck.
- *  - creatures: power+toughness scaled by the same evasive/scary keyword
- *    multiplier ThreatAssessor uses for the opponents' boards - a card
- *    that would be a big threat in someone else's hands is also a good
- *    one to play in mine.
- *  - other permanents (artifacts/enchantments with no mana ability):
- *    no real signal available, falls back to CMC as a rough impact
- *    proxy - an acknowledged blind spot, not a considered judgment that
- *    they're worth exactly their CMC.
- * Commander gets a hard priority override, same as before - casting your
- * commander as soon as affordable is almost always correct in Commander
- * regardless of what else is available.
+ * Re-solved from scratch on every call rather than planned once and
+ * remembered: after casting one of the chosen items, the available mana
+ * drops by exactly its cost and it drops out of the candidate list, which
+ * by the knapsack's own optimal-substructure property reproduces "the
+ * rest of the original plan" as the new optimum - no separate plan object
+ * needs to survive between calls, and the result can't go stale if
+ * something else about the board changes mid-turn.
+ *
+ * Two related affordability bugs fixed along the way: the previous
+ * version (and the simple heuristic AI before it) used the *total* land
+ * count as the mana budget, which doesn't account for lands already
+ * tapped to pay for an earlier cast this same turn - and counted only
+ * lands, never mana rocks, as mana sources at all. Both are corrected
+ * here by deriving the budget from currently-untapped CardStateView.tapped
+ * across every producesMana permanent, not just untapped lands.
  */
 public class GenericSpellSequencer implements SpellSequencer {
     @Override
@@ -50,19 +51,48 @@ public class GenericSpellSequencer implements SpellSequencer {
                 castableIds.put(c.id, c);
             }
         }
-        List<CardStateView> battlefieldLands = new ArrayList<>();
+        List<CardStateView> manaSources = new ArrayList<>();
         if (you != null && you.battlefield != null) {
             for (CardStateView c : you.battlefield) {
-                if (c.typeLine != null && c.typeLine.contains("Land")) {
-                    battlefieldLands.add(c);
+                if (c.producesMana) {
+                    manaSources.add(c);
                 }
             }
         }
-        int numLands = battlefieldLands.size();
+        // Total mana sources (tapped or not) for the ramp-bonus tapering
+        // calculation in valueOf - "how much do I still need more ramp"
+        // is about overall game progress, not what happens to be tapped
+        // this instant.
+        int totalManaSources = manaSources.size();
+        int availableMana = (int) manaSources.stream().filter(c -> !c.tapped).count();
 
-        DecisionRequest.Option best = null;
-        double bestEfficiency = Double.NEGATIVE_INFINITY;
-        boolean bestIsCommander = false;
+        // Commander still gets a hard priority override - casting it as
+        // soon as affordable outranks any value/efficiency comparison.
+        for (DecisionRequest.Option o : nonLandOptions) {
+            String cardId = o.cardId;
+            if (cardId == null || !castableIds.containsKey(cardId) || excludedCardIds.contains(cardId)) {
+                continue;
+            }
+            CardStateView card = castableIds.get(cardId);
+            if (!card.isCommander) {
+                continue;
+            }
+            if (ManaUtils.manaValue(card.manaCost) > availableMana) {
+                continue;
+            }
+            if (colorAffordable(card, manaSources)) {
+                return o;
+            }
+        }
+
+        return planBestSubset(nonLandOptions, castableIds, excludedCardIds, manaSources, availableMana, totalManaSources);
+    }
+
+    private DecisionRequest.Option planBestSubset(List<DecisionRequest.Option> nonLandOptions, Map<String, CardStateView> castableIds,
+            Set<String> excludedCardIds, List<CardStateView> manaSources, int availableMana, int totalManaSources) {
+        List<DecisionRequest.Option> candidates = new ArrayList<>();
+        List<Integer> costs = new ArrayList<>();
+        List<Double> values = new ArrayList<>();
         for (DecisionRequest.Option o : nonLandOptions) {
             String cardId = o.cardId;
             if (cardId == null || !castableIds.containsKey(cardId) || excludedCardIds.contains(cardId)) {
@@ -70,54 +100,77 @@ public class GenericSpellSequencer implements SpellSequencer {
             }
             CardStateView card = castableIds.get(cardId);
             int cmc = ManaUtils.manaValue(card.manaCost);
-            if (cmc > numLands) {
+            if (cmc > availableMana || !colorAffordable(card, manaSources)) {
                 continue;
             }
-            boolean colorOk = true;
-            for (String color : ManaUtils.colorsInCost(card.manaCost)) {
-                boolean hasSource = battlefieldLands.stream()
-                        .anyMatch(land -> land.producedColors != null && land.producedColors.contains(color));
-                if (!hasSource) {
-                    colorOk = false;
-                    break;
+            candidates.add(o);
+            costs.add(cmc);
+            values.add(valueOf(card, totalManaSources));
+        }
+        if (candidates.isEmpty()) {
+            return null;
+        }
+
+        // 0/1 knapsack: dp[i][c] = best total value using only the first
+        // i candidates with total cost <= c.
+        int n = candidates.size();
+        double[][] dp = new double[n + 1][availableMana + 1];
+        for (int i = 1; i <= n; i++) {
+            int cost = costs.get(i - 1);
+            double value = values.get(i - 1);
+            for (int c = 0; c <= availableMana; c++) {
+                dp[i][c] = dp[i - 1][c];
+                if (cost <= c) {
+                    dp[i][c] = Math.max(dp[i][c], dp[i - 1][c - cost] + value);
                 }
             }
-            if (!colorOk) {
-                continue;
-            }
+        }
 
-            // Getting the commander onto the battlefield as soon as
-            // affordable outranks plain value/efficiency, but a
-            // higher-priority commander option found later still wins
-            // over an earlier non-commander pick.
-            boolean isCommander = card.isCommander;
-            if (best != null && bestIsCommander && !isCommander) {
-                continue;
-            }
-            if (isCommander && !bestIsCommander) {
-                best = o;
-                bestIsCommander = true;
-                continue;
-            }
-
-            double efficiency = valueOf(card, numLands) / Math.max(1, cmc);
-            if (efficiency > bestEfficiency) {
-                bestEfficiency = efficiency;
-                best = o;
-                bestIsCommander = isCommander;
+        // Backtrack to recover which candidates the optimal plan actually
+        // includes - any single one of them is a correct next move, since
+        // re-solving after casting it reproduces the rest of the plan.
+        List<Integer> chosen = new ArrayList<>();
+        int c = availableMana;
+        for (int i = n; i >= 1; i--) {
+            if (dp[i][c] != dp[i - 1][c]) {
+                chosen.add(i - 1);
+                c -= costs.get(i - 1);
             }
         }
-        return best;
+        if (chosen.isEmpty()) {
+            return null;
+        }
+        // Cast the most expensive chosen item first - mostly a matter of
+        // sequencing sanity (bigger effects landing before smaller ones),
+        // not load-bearing for the total value achieved.
+        int bestIdx = chosen.get(0);
+        for (int idx : chosen) {
+            if (costs.get(idx) > costs.get(bestIdx)) {
+                bestIdx = idx;
+            }
+        }
+        return candidates.get(bestIdx);
     }
 
-    private double valueOf(CardStateView card, int numLands) {
+    private boolean colorAffordable(CardStateView card, List<CardStateView> manaSources) {
+        for (String color : ManaUtils.colorsInCost(card.manaCost)) {
+            boolean hasUntappedSource = manaSources.stream()
+                    .anyMatch(s -> !s.tapped && s.producedColors != null && s.producedColors.contains(color));
+            if (!hasUntappedSource) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private double valueOf(CardStateView card, int totalManaSources) {
         double value = 0;
         if (card.producesMana) {
             // Ramp is worth the most when mana is actually the
             // bottleneck (early), tapering to ~0 once there's already
-            // plenty of it - a 7th mana rock doesn't accelerate anything
-            // that isn't already accelerated.
-            value += Math.max(0, 6 - numLands) * 2.0;
+            // plenty of it - a 7th mana source doesn't accelerate
+            // anything that isn't already accelerated.
+            value += Math.max(0, 6 - totalManaSources) * 2.0;
         }
         if (card.typeLine != null && card.typeLine.contains("Creature")) {
             int power = card.power != null ? card.power : 0;

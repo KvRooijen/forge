@@ -71,7 +71,7 @@ public class GameServer {
         try {
             RegisteredPlayer human = RegisteredPlayer.forCommander(
                     ForgeBootstrap.loadPreconDeck("Sultai Arisen [TDC] [2025].dck"))
-                    .setPlayer(new LobbyPlayerRemote("Human (Kotis, Sibsig Champion)", humanChannel, humanChannel));
+                    .setPlayer(new LobbyPlayerRemote("Human (Teval, the Balanced Scale)", humanChannel, humanChannel));
             // All seats - human and AI - go through RemotePlayerController.
             // The AI seat runs the heuristic AI in-process (InProcessAiChannel)
             // instead of round-tripping over HTTP to a separate process - see
