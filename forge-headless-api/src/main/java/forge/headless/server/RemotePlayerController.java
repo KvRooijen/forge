@@ -887,17 +887,40 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public Pair<SpellAbilityStackInstance, GameObject> chooseTarget(SpellAbility sa, List<Pair<SpellAbilityStackInstance, GameObject>> allTargets) {
-        return pickOne(allTargets);
+        // Backs "change the target of target spell" redirect effects -
+        // choosing *which* of that spell's (possibly several) targets to
+        // redirect. Was a random pick instead of asking.
+        if (allTargets.size() <= 1) {
+            return allTargets.isEmpty() ? null : allTargets.get(0);
+        }
+        List<Pair<SpellAbilityStackInstance, GameObject>> chosen = chooseFromList("Choose a target to change",
+                allTargets, 1, 1, p -> p.getValue().toString(),
+                p -> p.getValue() instanceof Card c ? cardIdOf(c) : null);
+        return chosen.isEmpty() ? allTargets.get(0) : chosen.get(0);
     }
 
     @Override
     public boolean helpPayForAssistSpell(ManaCostBeingPaid cost, SpellAbility sa, int max, int requested) {
+        // Assist (e.g. Battalion Foot Soldier-style spells): another player
+        // may pay some of the generic cost. Mirrors PlayerControllerHuman -
+        // ask how much, actually pay that amount from this (the assisting)
+        // player's own mana, then reduce the caster's real cost only once
+        // payment succeeds. Was a hardcoded decline.
+        int willPay = chooseNumber(sa, "How much would you like to help pay for Assist? (Max: " + max + ")", 0, max);
+        if (willPay <= 0) {
+            return true;
+        }
+        ManaCostBeingPaid assistCost = new ManaCostBeingPaid(ManaCost.get(willPay));
+        if (applyManaToCost(assistCost, sa, "Paying for assist", null, false)) {
+            cost.decreaseGenericMana(willPay);
+            return true;
+        }
         return false;
     }
 
     @Override
     public Player choosePlayerToAssistPayment(FCollectionView<Player> optionList, SpellAbility sa, String title, int max) {
-        return null;
+        return chooseSingleEntityForEffect(optionList, null, sa, title, true, null, null);
     }
 
     @Override
@@ -909,7 +932,16 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public CardCollection chooseCardsForEffectMultiple(Map<String, CardCollection> validMap, SpellAbility sa, String title, boolean isOptional) {
-        return new CardCollection();
+        // Each entry is its own bucket of candidates (e.g. a dig effect
+        // separately offering "a creature card" and "a land card") - up to
+        // one pick per bucket, same as PlayerControllerHuman. Was always
+        // returning nothing chosen.
+        CardCollection result = new CardCollection();
+        for (Map.Entry<String, CardCollection> e : validMap.entrySet()) {
+            result.addAll(chooseCardsForEffect(e.getValue(), sa,
+                    (title != null ? title : "Choose cards") + " (" + e.getKey() + ")", 0, 1, isOptional, null));
+        }
+        return result;
     }
 
     @Override
@@ -1132,7 +1164,13 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public boolean willPutCardOnTop(Card c) {
-        return randomBoolean();
+        // Clash: after revealing the top card, each player decides for
+        // themselves whether it goes back on top or to the bottom - a
+        // real per-player decision, not a random tie-break. Was a coin
+        // flip.
+        DecisionResponse resp = ask("CONFIRM",
+                "Put " + c.getName() + " on top of your library? (otherwise it goes to the bottom)", null);
+        return resp.booleanValue != null ? resp.booleanValue : true;
     }
 
     @Override
@@ -1200,12 +1238,51 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public Map<Card, ManaCostShard> chooseCardsForConvokeOrImprovise(SpellAbility sa, ManaCost manaCost, CardCollectionView untappedCards, boolean artifacts, boolean creatures, Integer maxReduction) {
-        return new java.util.HashMap<>();
+        // Mirrors InputSelectCardsForConvokeOrImprovise: tap untapped
+        // creatures/artifacts one at a time to pay part of the cost
+        // instead of mana, picking which color (or colorless, for
+        // Improvise) each contributes - stopping once the cost is fully
+        // paid, the cap is hit, or the player declines further taps. Was
+        // always returning no cards tapped at all.
+        Map<Card, ManaCostShard> chosen = new java.util.HashMap<>();
+        ManaCostBeingPaid remainingCost = new ManaCostBeingPaid(manaCost);
+        List<Card> remaining = new ArrayList<>(untappedCards);
+        int maxSelectable = maxReduction != null ? maxReduction : Math.min(manaCost.getCMC(), untappedCards.size());
+        String cardType = artifacts && creatures ? "artifact or creature" : creatures ? "creature" : "artifact";
+        String description = artifacts && creatures ? "Waterbend" : creatures ? "Convoke" : "Improvise";
+
+        while (chosen.size() < maxSelectable && !remaining.isEmpty() && !remainingCost.isPaid()) {
+            List<Card> pick = chooseFromList(description + " - tap a " + cardType + " to help pay (remaining: "
+                    + remainingCost + "), or none to stop", remaining, 0, 1, Card::toString, RemotePlayerController::cardIdOf);
+            if (pick.isEmpty()) {
+                break;
+            }
+            Card card = pick.get(0);
+            remaining.remove(card);
+            byte chosenColor;
+            if (artifacts && !creatures) {
+                chosenColor = ManaCostShard.COLORLESS.getColorMask();
+            } else {
+                ColorSet colors = card.getColor();
+                if (colors.isMulticolor()) {
+                    colors = ColorSet.fromMask(colors.getColor() & remainingCost.getUnpaidColors());
+                }
+                chosenColor = colors.isMulticolor()
+                        ? chooseColorAllowColorless(description + " " + card + " - for which color?", card, colors)
+                        : colors.getColor();
+            }
+            ManaCostShard shard = remainingCost.payManaViaConvoke(chosenColor);
+            if (shard != null) {
+                chosen.put(card, shard);
+            }
+        }
+        return chosen;
     }
 
     @Override
     public List<Card> chooseCardsForSplice(SpellAbility sa, List<Card> cards) {
-        return new ArrayList<>();
+        return chooseFromList("Choose cards to splice onto " + sa.getHostCard().getName(), cards, 0, cards.size(),
+                Card::toString, RemotePlayerController::cardIdOf);
     }
 
     @Override
@@ -1216,7 +1293,23 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public List<SpellAbility> chooseSaToActivateFromOpeningHand(List<SpellAbility> usableFromOpeningHand) {
-        return new ArrayList<>();
+        // Rule 103.5: player picks which to activate, and the order to
+        // resolve them in. Was always declining all of them.
+        List<SpellAbility> chosen = chooseFromList("Choose abilities to activate from your opening hand",
+                usableFromOpeningHand, 0, usableFromOpeningHand.size(), SpellAbility::toString, null);
+        if (chosen.size() <= 1) {
+            return chosen;
+        }
+        List<SpellAbility> remaining = new ArrayList<>(chosen);
+        List<SpellAbility> ordered = new ArrayList<>();
+        while (!remaining.isEmpty()) {
+            List<SpellAbility> pick = chooseFromList("Choose the order to activate these - position "
+                    + (ordered.size() + 1) + " of " + chosen.size(), remaining, 1, 1, SpellAbility::toString, null);
+            SpellAbility next = pick.isEmpty() ? remaining.get(0) : pick.get(0);
+            ordered.add(next);
+            remaining.remove(next);
+        }
+        return ordered;
     }
 
     @Override
