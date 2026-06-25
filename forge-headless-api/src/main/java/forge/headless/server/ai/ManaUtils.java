@@ -1,6 +1,8 @@
 package forge.headless.server.ai;
 
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -43,5 +45,25 @@ public final class ManaUtils {
             }
         }
         return colors;
+    }
+
+    /** Same restriction as colorsInCost (single-letter WUBRG symbols only,
+     * no hybrid/Phyrexian) but keeps the count - {R}{R} needs two separate
+     * red sources, not "a red source", which matters once more than one
+     * card's colored requirements have to be satisfied from the same pool
+     * of mana sources in the same turn. */
+    public static Map<String, Integer> colorPipCounts(String manaCost) {
+        Map<String, Integer> counts = new HashMap<>();
+        if (manaCost == null) {
+            return counts;
+        }
+        Matcher m = MANA_SYMBOL.matcher(manaCost);
+        while (m.find()) {
+            String symbol = m.group(1);
+            if (symbol.length() == 1 && "WUBRG".contains(symbol)) {
+                counts.merge(symbol, 1, Integer::sum);
+            }
+        }
+        return counts;
     }
 }

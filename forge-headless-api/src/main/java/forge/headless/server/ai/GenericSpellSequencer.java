@@ -37,6 +37,14 @@ import java.util.Set;
  * lands, never mana rocks, as mana sources at all. Both are corrected
  * here by deriving the budget from currently-untapped CardStateView.tapped
  * across every producesMana permanent, not just untapped lands.
+ *
+ * The CMC-only knapsack still doesn't know about color contention between
+ * the cards it plans together - colorAffordable only checks "a source
+ * exists" per card independently, so it can plan two single-R-pip cards
+ * with only one Mountain on the battlefield. Fixed via a bipartite-
+ * matching feasibility check (colorFeasibleTogether) over the chosen
+ * subset as a whole, repairing infeasible plans by dropping the least
+ * valuable colored offender until what's left is jointly payable.
  */
 public class GenericSpellSequencer implements SpellSequencer {
     @Override
@@ -140,6 +148,35 @@ public class GenericSpellSequencer implements SpellSequencer {
         if (chosen.isEmpty()) {
             return null;
         }
+
+        // The CMC-only knapsack above can plan two cards that are each
+        // individually castable (colorAffordable just checks "a source
+        // exists" per card) but jointly aren't - e.g. two single-R-pip
+        // cards with only one Mountain. Repeatedly drop the least
+        // valuable colored card from the plan until what's left is
+        // actually jointly payable (verified via bipartite matching:
+        // can every required colored pip across the whole chosen set be
+        // assigned to a distinct untapped source?).
+        while (!chosen.isEmpty() && !colorFeasibleTogether(chosen, candidates, castableIds, manaSources)) {
+            int worst = -1;
+            for (int idx : chosen) {
+                CardStateView card = castableIds.get(candidates.get(idx).cardId);
+                if (ManaUtils.colorPipCounts(card.manaCost).isEmpty()) {
+                    continue; // dropping a colorless card can't fix color contention
+                }
+                if (worst == -1 || values.get(idx) < values.get(worst)) {
+                    worst = idx;
+                }
+            }
+            if (worst == -1) {
+                break; // nothing colored left to drop - shouldn't happen given the per-card gate already passed, but don't loop forever
+            }
+            chosen.remove(Integer.valueOf(worst));
+        }
+        if (chosen.isEmpty()) {
+            return null;
+        }
+
         // Cast the most expensive chosen item first - mostly a matter of
         // sequencing sanity (bigger effects landing before smaller ones),
         // not load-bearing for the total value achieved.
@@ -161,6 +198,57 @@ public class GenericSpellSequencer implements SpellSequencer {
             }
         }
         return true;
+    }
+
+    /** Bipartite matching: one node per required colored pip across every
+     * chosen card (a {R}{R} cost contributes two separate "R" pips, not
+     * one), one node per currently-untapped mana source, an edge wherever
+     * a source can produce that color. Feasible iff every pip can be
+     * matched to a distinct source (Kuhn's algorithm / augmenting paths -
+     * trivial at this scale, a handful of pips against a handful of
+     * sources). */
+    private boolean colorFeasibleTogether(List<Integer> chosenIndices, List<DecisionRequest.Option> candidates,
+            Map<String, CardStateView> castableIds, List<CardStateView> manaSources) {
+        List<String> pips = new ArrayList<>();
+        for (int idx : chosenIndices) {
+            CardStateView card = castableIds.get(candidates.get(idx).cardId);
+            for (Map.Entry<String, Integer> e : ManaUtils.colorPipCounts(card.manaCost).entrySet()) {
+                for (int i = 0; i < e.getValue(); i++) {
+                    pips.add(e.getKey());
+                }
+            }
+        }
+        if (pips.isEmpty()) {
+            return true;
+        }
+        List<CardStateView> sources = manaSources.stream().filter(s -> !s.tapped).toList();
+        int[] matchedTo = new int[sources.size()];
+        java.util.Arrays.fill(matchedTo, -1);
+        for (int i = 0; i < pips.size(); i++) {
+            if (!tryAssignPip(i, pips, sources, matchedTo, new boolean[sources.size()])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean tryAssignPip(int pipIdx, List<String> pips, List<CardStateView> sources, int[] matchedTo, boolean[] visited) {
+        String color = pips.get(pipIdx);
+        for (int j = 0; j < sources.size(); j++) {
+            if (visited[j]) {
+                continue;
+            }
+            CardStateView source = sources.get(j);
+            if (source.producedColors == null || !source.producedColors.contains(color)) {
+                continue;
+            }
+            visited[j] = true;
+            if (matchedTo[j] == -1 || tryAssignPip(matchedTo[j], pips, sources, matchedTo, visited)) {
+                matchedTo[j] = pipIdx;
+                return true;
+            }
+        }
+        return false;
     }
 
     private double valueOf(CardStateView card, int totalManaSources) {
