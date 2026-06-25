@@ -73,15 +73,17 @@ public class GameServer {
                     ForgeBootstrap.loadPreconDeck("Sultai Arisen [TDC] [2025].dck"))
                     .setPlayer(new LobbyPlayerRemote("Human (Teval, the Balanced Scale)", humanChannel, humanChannel));
             // All seats - human and AI - go through RemotePlayerController.
-            // The AI seat runs the heuristic AI in-process (InProcessAiChannel)
-            // instead of round-tripping over HTTP to a separate process - see
-            // its class comment. Each non-human seat also gets a reference to
-            // the human's WebSocket as a "spectator channel" so the human's
-            // view stays live while AI seats act, not just during their own
-            // turn.
+            // The AI seat runs in-process (no network hop, see
+            // RuleBasedAiChannel's class comment) - RULE_BASED_V2 rather
+            // than the older SIMPLE_HEURISTIC/InProcessAiChannel, so
+            // interactive play exercises the same brain under active
+            // development, not the frozen baseline. Each non-human seat
+            // also gets a reference to the human's WebSocket as a
+            // "spectator channel" so the human's view stays live while AI
+            // seats act, not just during their own turn.
             RegisteredPlayer ai1 = RegisteredPlayer.forCommander(
                     ForgeBootstrap.loadPreconDeck("Veloci-Ramp-Tor [LCC] [2023].dck"))
-                    .setPlayer(new LobbyPlayerRemote("AI (Pantlaza)", new InProcessAiChannel(), humanChannel));
+                    .setPlayer(new LobbyPlayerRemote("AI (Pantlaza)", new RuleBasedAiChannel(), humanChannel));
             // Temporarily 1v1 (Hakbal/Eshki seats disabled) for easier debugging.
 
             GameRules rules = new GameRules(GameType.Commander);

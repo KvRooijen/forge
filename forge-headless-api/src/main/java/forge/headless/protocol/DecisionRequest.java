@@ -20,6 +20,14 @@ public class DecisionRequest {
      * whole combat can be shown and answered in a single request instead of
      * one CHOOSE_LIST per attacker in sequence. */
     public List<Group> groups;
+    /** Only set for CHOOSE_LIST requests that are specifically choosing a
+     * target for a spell/ability ("HARMFUL"/"BENEFICIAL"), and only when
+     * that classification is high-confidence (see
+     * RemotePlayerController.classifyTargetIntent) - null for every other
+     * CHOOSE_LIST use (discard, sacrifice, surveil, mode choice, ...),
+     * which need different logic (e.g. "worst card", not "most
+     * threatening") and shouldn't be treated as a targeting decision. */
+    public String targetIntent;
 
     public DecisionRequest() { }
 

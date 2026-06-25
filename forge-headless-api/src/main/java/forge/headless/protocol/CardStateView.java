@@ -60,6 +60,11 @@ public class CardStateView {
      * logic uses and acknowledges as imperfect - conditional taplands
      * that only sometimes enter tapped aren't distinguished here). */
     public boolean entersTapped;
+    /** True if the viewing player controls this card right now - lets a
+     * decision-maker tell "my own creature" from "an opponent's" for any
+     * Card-backed option (e.g. picking a target), without needing a
+     * separate signal threaded through every call site individually. */
+    public boolean controllerIsYou;
 
     public static class RoomDoor {
         public String name;
@@ -80,7 +85,8 @@ public class CardStateView {
             boolean sick, Map<String, Integer> counters, boolean attacking,
             String attackingTarget, String blockingAttacker, boolean producesMana,
             RoomDoor leftDoor, RoomDoor rightDoor, List<String> keywords,
-            String attachedToId, Integer commanderTax, List<String> producedColors, boolean entersTapped) {
+            String attachedToId, Integer commanderTax, List<String> producedColors, boolean entersTapped,
+            boolean controllerIsYou) {
         this.id = id;
         this.name = name;
         this.manaCost = manaCost;
@@ -102,5 +108,6 @@ public class CardStateView {
         this.commanderTax = commanderTax;
         this.producedColors = producedColors;
         this.entersTapped = entersTapped;
+        this.controllerIsYou = controllerIsYou;
     }
 }

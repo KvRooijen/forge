@@ -242,9 +242,14 @@ public class RemotePlayerController extends PlayerController {
     }
 
     private DecisionResponse askList(String prompt, List<DecisionRequest.Option> options, int min, int max) {
+        return askList(prompt, options, min, max, null);
+    }
+
+    private DecisionResponse askList(String prompt, List<DecisionRequest.Option> options, int min, int max, String targetIntent) {
         DecisionRequest req = new DecisionRequest(UUID.randomUUID().toString(), "CHOOSE_LIST", prompt, options, safeBuildStateView(player));
         req.min = min;
         req.max = max;
+        req.targetIntent = targetIntent;
         return channel.ask(req);
     }
 
@@ -259,6 +264,18 @@ public class RemotePlayerController extends PlayerController {
      */
     <T> List<T> chooseFromList(String prompt, List<T> source, int min, int max,
             java.util.function.Function<T, String> labelFn, java.util.function.Function<T, String> cardIdFn) {
+        return chooseFromList(prompt, source, min, max, labelFn, cardIdFn, null);
+    }
+
+    /** targetIntent is a coarse, high-confidence-only hint ("HARMFUL"/
+     * "BENEFICIAL"/null) for the specific case of choosing a target for a
+     * spell/ability - see chooseTargetsFor. Every other caller of this
+     * method (discard, sacrifice, surveil, mode choice, ...) passes null,
+     * unchanged from before this existed - a discard/sacrifice choice
+     * needs "worst card", not "most threatening", so it'd be actively
+     * wrong to apply targeting logic there. */
+    <T> List<T> chooseFromList(String prompt, List<T> source, int min, int max,
+            java.util.function.Function<T, String> labelFn, java.util.function.Function<T, String> cardIdFn, String targetIntent) {
         if (source.isEmpty()) {
             return new ArrayList<>();
         }
@@ -277,7 +294,7 @@ public class RemotePlayerController extends PlayerController {
             options.add(new DecisionRequest.Option(String.valueOf(i), labelFn.apply(item),
                     cardIdFn != null ? cardIdFn.apply(item) : null, cardView));
         }
-        DecisionResponse resp = askList(prompt, options, Math.max(min, 0), Math.min(max, source.size()));
+        DecisionResponse resp = askList(prompt, options, Math.max(min, 0), Math.min(max, source.size()), targetIntent);
         List<T> chosen = new ArrayList<>();
         if (resp.chosenIds != null) {
             for (String id : resp.chosenIds) {
@@ -571,7 +588,7 @@ public class RemotePlayerController extends PlayerController {
                 c.isRoom() ? roomDoorOf(c, forge.card.CardStateName.RightSplit) : null,
                 keywords,
                 attachedTo != null ? String.valueOf(attachedTo.getId()) : null,
-                commanderTax, producedColors, entersTapped);
+                commanderTax, producedColors, entersTapped, c.getController() != null && c.getController().equals(player));
     }
 
     /** CardStateName.LeftSplit/RightSplit are the two fixed door slots a
@@ -880,6 +897,38 @@ public class RemotePlayerController extends PlayerController {
         return sa.getTargets();
     }
 
+    private static final java.util.Set<forge.game.ability.ApiType> HARMFUL_TARGET_APIS = java.util.Set.of(
+            forge.game.ability.ApiType.Destroy, forge.game.ability.ApiType.DealDamage,
+            forge.game.ability.ApiType.Sacrifice, forge.game.ability.ApiType.SacrificeAll,
+            forge.game.ability.ApiType.GainControl, forge.game.ability.ApiType.GainControlVariant);
+    private static final java.util.Set<forge.game.ability.ApiType> BENEFICIAL_TARGET_APIS = java.util.Set.of(
+            forge.game.ability.ApiType.Untap, forge.game.ability.ApiType.Protection, forge.game.ability.ApiType.ProtectionAll);
+
+    /** High-confidence-only classification of whether this ability's
+     * effect is generally bad or good for whatever it targets - used so
+     * the AI can point removal/disruption at the most threatening
+     * candidate and buffs/protection at its own best one, instead of
+     * picking blindly. Deliberately conservative: ApiTypes whose
+     * direction depends on parameters (Pump's sign, PutCounter's counter
+     * type) are left unclassified (null) rather than guessed, since a
+     * wrong guess (treating a -1/-1 counter removal spell as beneficial)
+     * would be worse than no signal at all. ChangeZone (covers exile,
+     * flicker, tutor, mill, bounce, and more depending on parameters) is
+     * excluded for the same reason. */
+    private static String classifyTargetIntent(SpellAbility sa) {
+        forge.game.ability.ApiType api = sa.getApi();
+        if (api == null) {
+            return null;
+        }
+        if (HARMFUL_TARGET_APIS.contains(api)) {
+            return "HARMFUL";
+        }
+        if (BENEFICIAL_TARGET_APIS.contains(api)) {
+            return "BENEFICIAL";
+        }
+        return null;
+    }
+
     @Override
     public boolean chooseTargetsFor(SpellAbility currentAbility) {
         // Real target selection (e.g. "create a token that's a copy of
@@ -898,6 +947,7 @@ public class RemotePlayerController extends PlayerController {
         if (max == 0) {
             return min == 0;
         }
+        String targetIntent = classifyTargetIntent(currentAbility);
         // Pick targets one at a time and re-derive candidates after each
         // pick (rather than computing the full candidate list once and
         // letting the player bulk-select up to max from it) - canTarget
@@ -918,7 +968,7 @@ public class RemotePlayerController extends PlayerController {
             }
             int pickMin = picked < min ? 1 : 0;
             List<GameObject> pick = chooseFromList(currentAbility.getStackDescription(), candidates, pickMin, 1,
-                    GameObject::toString, RemotePlayerController::cardIdOf);
+                    GameObject::toString, RemotePlayerController::cardIdOf, targetIntent);
             if (pick.isEmpty()) {
                 break;
             }

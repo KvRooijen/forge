@@ -17,6 +17,7 @@ public class HeuristicAiBrain {
     public final ListChoiceStrategy listChoiceStrategy;
     public final TriggerStrategy triggerStrategy;
     public final MulliganStrategy mulliganStrategy;
+    public final TargetingStrategy targetingStrategy;
 
     private HeuristicAiBrain(Builder b) {
         this.threatAssessor = b.threatAssessor;
@@ -27,6 +28,7 @@ public class HeuristicAiBrain {
         this.listChoiceStrategy = b.listChoiceStrategy;
         this.triggerStrategy = b.triggerStrategy;
         this.mulliganStrategy = b.mulliganStrategy;
+        this.targetingStrategy = b.targetingStrategy;
     }
 
     public static Builder builder() {
@@ -46,6 +48,7 @@ public class HeuristicAiBrain {
         private ListChoiceStrategy listChoiceStrategy = new GenericListChoiceStrategy();
         private TriggerStrategy triggerStrategy = new GenericTriggerStrategy();
         private MulliganStrategy mulliganStrategy = new GenericMulliganStrategy();
+        private TargetingStrategy targetingStrategy = new GenericTargetingStrategy();
 
         public Builder threatAssessor(ThreatAssessor v) { this.threatAssessor = v; return this; }
         public Builder landPlayStrategy(LandPlayStrategy v) { this.landPlayStrategy = v; return this; }
@@ -55,6 +58,7 @@ public class HeuristicAiBrain {
         public Builder listChoiceStrategy(ListChoiceStrategy v) { this.listChoiceStrategy = v; return this; }
         public Builder triggerStrategy(TriggerStrategy v) { this.triggerStrategy = v; return this; }
         public Builder mulliganStrategy(MulliganStrategy v) { this.mulliganStrategy = v; return this; }
+        public Builder targetingStrategy(TargetingStrategy v) { this.targetingStrategy = v; return this; }
 
         public HeuristicAiBrain build() {
             return new HeuristicAiBrain(this);

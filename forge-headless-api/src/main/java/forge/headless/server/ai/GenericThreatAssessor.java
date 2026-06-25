@@ -26,25 +26,7 @@ public class GenericThreatAssessor implements ThreatAssessor {
         List<CardStateView> battlefield = player.battlefield != null ? player.battlefield : List.of();
 
         for (CardStateView c : battlefield) {
-            if (c.typeLine == null || !c.typeLine.contains("Creature")) {
-                continue;
-            }
-            int power = c.power != null ? c.power : 0;
-            if (power <= 0) {
-                continue;
-            }
-            double multiplier = CombatKeywords.impactMultiplier(c.keywords);
-            // Can't swing immediately, but still a real near-term threat -
-            // discounted, not ignored.
-            if (c.sick) {
-                multiplier *= 0.6;
-            }
-            score += power * multiplier;
-            // Usually the centerpiece of the deck's plan (extra abilities,
-            // what recursion targets) - worth more than its raw stats say.
-            if (c.isCommander) {
-                score += 3;
-            }
+            score += CreatureValue.of(c);
         }
 
         // More unknown cards in hand = more unplayed-for plays coming.
