@@ -35,6 +35,7 @@ test-output
 bin
 gen
 *.log
+batch_results.csv
 
 # Ignore macOS Spotlight rubbish
 .DS_Store

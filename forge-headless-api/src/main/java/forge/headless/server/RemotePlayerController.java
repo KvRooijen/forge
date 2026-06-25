@@ -67,8 +67,9 @@ import java.util.UUID;
 import java.util.function.Predicate;
 
 /**
- * Routes decisions to a remote client (human over WebSocket, or AI bridge
- * over HTTP). Everything not explicitly wired falls back to simple,
+ * Routes decisions to a remote channel - a human over WebSocket, or an AI
+ * seat's in-process heuristic channel (InProcessAiChannel) with no network
+ * hop at all. Everything not explicitly wired falls back to simple,
  * non-strategic defaults (decline/first/random) rather than an embedded
  * PlayerControllerAi - forge-ai's per-ability evaluator classes routinely
  * cast a player's controller to PlayerControllerAi (e.g. ManaAi,
@@ -1041,8 +1042,8 @@ public class RemotePlayerController extends PlayerController {
     @Override
     public void declareBlockers(Player defender, Combat combat) {
         // The AI seat keeps using forge-ai's own (already decent) block
-        // logic - ai-bridge's heuristics don't cover blocking yet, and
-        // there's no human on that end to ask. The human seat gets asked
+        // logic - InProcessAiChannel's heuristics don't cover blocking yet,
+        // and there's no human on that end to ask. The human seat gets asked
         // for real: this previously always fell through to the embedded
         // delegate for every seat, including the human's own defense,
         // which meant blocking was never actually interactive.
@@ -1849,9 +1850,16 @@ public class RemotePlayerController extends PlayerController {
     @Override
     public String chooseCardName(SpellAbility sa, Predicate<ICardFace> cpp, String valid, String message) {
         // Naming any card in the database (e.g. Meddling Mage-style effects)
-        // would need a searchable card list UI we don't have yet - leave
-        // unimplemented rather than fake a choice from an unfiltered set.
-        return null;
+        // would need a searchable card list UI we don't have yet. Was a
+        // bare null - ChooseCardNameEffect doesn't null-check before
+        // calling chosen.isEmpty(), so that crashed the game outright the
+        // moment any seat (human or AI) hit one of these effects. Falling
+        // back to a random valid name instead - the same fallback the
+        // engine itself already uses one branch over for its "random"
+        // mode - means this is merely not-smart instead of fatal.
+        return forge.StaticData.instance().getCommonCards().streamAllFaces()
+                .filter(cpp).collect(forge.util.StreamUtil.random())
+                .map(ICardFace::getName).orElse("");
     }
 
     @Override
