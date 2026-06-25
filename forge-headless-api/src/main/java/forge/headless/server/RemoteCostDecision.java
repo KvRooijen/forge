@@ -372,11 +372,14 @@ class RemoteCostDecision extends CostDecisionMakerBase {
 
     @Override
     public PaymentDecision visit(CostGainControl cost) {
+        // Forge's own InputSelectCardsFromList(controller, c, validCards, sa)
+        // requires exactly c, not "up to c" - was letting the player submit
+        // fewer (even zero) permanents than the cost actually demands.
         int c = cost.getAbilityAmount(ability);
         CardCollectionView validCards = CardLists.getValidCards(player.getCardsIn(ZoneType.Battlefield), cost.getType().split(";"), player, source, ability);
         validCards = CardLists.filter(validCards, crd -> crd.canBeControlledBy(player));
-        List<Card> chosen = pick("Give up control of " + c + " permanent(s)", new ArrayList<>(validCards), 0, c);
-        return PaymentDecision.card(chosen);
+        List<Card> chosen = pick("Give up control of " + c + " permanent(s)", new ArrayList<>(validCards), c, c);
+        return chosen.size() == c ? PaymentDecision.card(chosen) : null;
     }
 
     @Override
