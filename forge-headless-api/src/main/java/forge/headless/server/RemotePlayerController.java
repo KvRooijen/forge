@@ -1076,7 +1076,7 @@ public class RemotePlayerController extends PlayerController {
         List<Card> ordered = new ArrayList<>();
         while (!remaining.isEmpty()) {
             String stepPrompt = prompt + " - choose position " + (ordered.size() + 1) + " of " + cards.size();
-            List<Card> pick = chooseFromList(stepPrompt, remaining, 1, 1, Card::getName, c -> String.valueOf(c.getId()));
+            List<Card> pick = chooseFromList(stepPrompt, remaining, 1, 1, Card::getName, RemotePlayerController::cardIdOf);
             Card chosen = pick.isEmpty() ? remaining.get(0) : pick.get(0);
             ordered.add(chosen);
             remaining.remove(chosen);
