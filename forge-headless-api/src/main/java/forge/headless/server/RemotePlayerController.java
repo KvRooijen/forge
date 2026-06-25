@@ -390,7 +390,10 @@ public class RemotePlayerController extends PlayerController {
                     p.getCardsIn(ZoneType.Library).size(),
                     topOfLibraryViewFor(p),
                     floatingManaOf(p),
-                    stopAtPhasesForP));
+                    stopAtPhasesForP,
+                    p.getPoisonCounters(),
+                    p.getCounters(forge.game.card.CounterEnumType.ENERGY),
+                    p.getCounters(forge.game.card.CounterEnumType.EXPERIENCE)));
         }
         // GameLog.getLogEntriesForTypes already returns newest-first (see
         // its own doc comment) - taking a tail slice of that, like this
@@ -406,6 +409,10 @@ public class RemotePlayerController extends PlayerController {
         }
         forge.game.phase.PhaseType phase = g.getPhaseHandler().getPhase();
 
+        Player monarch = g.getMonarch();
+        Player hasInitiative = g.getHasInitiative();
+        String dayTime = g.isDay() ? "Day" : g.isNight() ? "Night" : null;
+
         return new GameStateView(
                 // Player.getTurn() is that player's own turn count (their
                 // 1st, 2nd, 3rd... turn), not the global turn number across
@@ -415,7 +422,10 @@ public class RemotePlayerController extends PlayerController {
                 active != null ? active.getName() : null,
                 playerViews,
                 stackItemViews(g),
-                log);
+                log,
+                monarch != null ? monarch.getName() : null,
+                hasInitiative != null ? hasInitiative.getName() : null,
+                dayTime);
     }
 
     private List<GameStateView.StackItemView> stackItemViews(Game g) {
@@ -512,6 +522,19 @@ public class RemotePlayerController extends PlayerController {
                 }
             }
         }
+        List<String> keywords = new ArrayList<>();
+        for (forge.game.keyword.KeywordInterface kw : c.getUnhiddenKeywords()) {
+            String text = kw.toString();
+            if (!text.isEmpty() && !keywords.contains(text)) {
+                keywords.add(text);
+            }
+        }
+        Card attachedTo = c.getAttachedTo();
+        Integer commanderTax = null;
+        if (c.isCommander() && c.getZone() != null && c.getZone().is(ZoneType.Command)) {
+            int tax = c.getOwner().getCommanderCast(c) * 2;
+            commanderTax = tax > 0 ? tax : null;
+        }
         return new CardStateView(
                 String.valueOf(c.getId()),
                 c.getName(),
@@ -528,7 +551,10 @@ public class RemotePlayerController extends PlayerController {
                 blockingAttacker,
                 !c.getManaAbilities().isEmpty(),
                 c.isRoom() ? roomDoorOf(c, forge.card.CardStateName.LeftSplit) : null,
-                c.isRoom() ? roomDoorOf(c, forge.card.CardStateName.RightSplit) : null);
+                c.isRoom() ? roomDoorOf(c, forge.card.CardStateName.RightSplit) : null,
+                keywords,
+                attachedTo != null ? String.valueOf(attachedTo.getId()) : null,
+                commanderTax);
     }
 
     /** CardStateName.LeftSplit/RightSplit are the two fixed door slots a

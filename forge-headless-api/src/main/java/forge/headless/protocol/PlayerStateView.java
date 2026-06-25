@@ -34,13 +34,20 @@ public class PlayerStateView {
      * for turns belonging to this player - see RemotePlayerController's
      * stopPhasesByTurnPlayer for why this is per-player, not shared. */
     public List<String> stopAtPhases;
+    /** Poison/energy/experience counters - always sent (0 when absent) so
+     * the frontend can decide when they're worth showing, rather than
+     * having no way to tell "0" from "not tracked at all". */
+    public int poisonCounters;
+    public int energyCounters;
+    public int experienceCounters;
 
     public PlayerStateView() { }
 
     public PlayerStateView(String name, int life, boolean isYou, boolean isActiveTurn, int handCount,
             List<CardStateView> hand, List<CardStateView> battlefield, List<CardStateView> commandZone,
             List<CardStateView> graveyard, List<CardStateView> exile, int libraryCount, CardStateView topOfLibrary,
-            Map<String, Integer> floatingMana, List<String> stopAtPhases) {
+            Map<String, Integer> floatingMana, List<String> stopAtPhases,
+            int poisonCounters, int energyCounters, int experienceCounters) {
         this.name = name;
         this.life = life;
         this.isYou = isYou;
@@ -55,5 +62,8 @@ public class PlayerStateView {
         this.topOfLibrary = topOfLibrary;
         this.floatingMana = floatingMana;
         this.stopAtPhases = stopAtPhases;
+        this.poisonCounters = poisonCounters;
+        this.energyCounters = energyCounters;
+        this.experienceCounters = experienceCounters;
     }
 }

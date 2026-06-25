@@ -1,5 +1,6 @@
 package forge.headless.protocol;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -32,6 +33,22 @@ public class CardStateView {
      * actual locked half instead of just listing door names in a corner. */
     public RoomDoor leftDoor;
     public RoomDoor rightDoor;
+    /** Current effective keywords (Card.getUnhiddenKeywords()) - not just
+     * what's printed on the card. Auras/equipment/anthems/etc. can grant
+     * keywords (hexproof, flying, ...) that never show up in the static
+     * card art the frontend renders, so without this the player would
+     * have no way to see them from the UI at all. */
+    public List<String> keywords;
+    /** Id of the permanent this card (an Aura/Equipment/Fortification) is
+     * currently attached to, if any - null otherwise. The board has no
+     * other way to show which creature an aura/equipment belongs to,
+     * since they just render as separate cards in the same battlefield
+     * list. */
+    public String attachedToId;
+    /** Generic mana tax for casting this commander from the command zone
+     * again (CR 903.8: +{2} per previous cast from the command zone this
+     * game) - null for non-commander cards or when the tax is 0. */
+    public Integer commanderTax;
 
     public static class RoomDoor {
         public String name;
@@ -51,7 +68,8 @@ public class CardStateView {
             Integer power, Integer toughness, boolean tapped, boolean isCommander,
             boolean sick, Map<String, Integer> counters, boolean attacking,
             String attackingTarget, String blockingAttacker, boolean producesMana,
-            RoomDoor leftDoor, RoomDoor rightDoor) {
+            RoomDoor leftDoor, RoomDoor rightDoor, List<String> keywords,
+            String attachedToId, Integer commanderTax) {
         this.id = id;
         this.name = name;
         this.manaCost = manaCost;
@@ -68,5 +86,8 @@ public class CardStateView {
         this.producesMana = producesMana;
         this.leftDoor = leftDoor;
         this.rightDoor = rightDoor;
+        this.keywords = keywords;
+        this.attachedToId = attachedToId;
+        this.commanderTax = commanderTax;
     }
 }

@@ -13,6 +13,16 @@ public class GameStateView {
      * only thing rendered here. */
     public List<StackItemView> stack;
     public List<String> log;
+    /** Name of whoever currently holds the Monarch/Initiative emblem, or
+     * null if neither is in play this game - these affect every player's
+     * turn (extra draw, dungeon-venturing) but were otherwise invisible
+     * unless you happened to remember who picked it up. */
+    public String monarch;
+    public String hasInitiative;
+    /** "Day" or "Night" once the day/night cycle has actually started
+     * (affects daybound/nightbound cards table-wide), null before then -
+     * matches Game.isDay()/isNight() both being false at game start. */
+    public String dayTime;
 
     public static class StackItemView {
         public CardStateView source;
@@ -29,12 +39,15 @@ public class GameStateView {
     public GameStateView() { }
 
     public GameStateView(int turnNumber, String phase, String activePlayerName, List<PlayerStateView> players,
-            List<StackItemView> stack, List<String> log) {
+            List<StackItemView> stack, List<String> log, String monarch, String hasInitiative, String dayTime) {
         this.turnNumber = turnNumber;
         this.phase = phase;
         this.activePlayerName = activePlayerName;
         this.players = players;
         this.stack = stack;
         this.log = log;
+        this.monarch = monarch;
+        this.hasInitiative = hasInitiative;
+        this.dayTime = dayTime;
     }
 }
