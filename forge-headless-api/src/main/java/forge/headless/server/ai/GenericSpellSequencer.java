@@ -38,13 +38,17 @@ import java.util.Set;
  * here by deriving the budget from currently-untapped CardStateView.tapped
  * across every producesMana permanent, not just untapped lands.
  *
- * The CMC-only knapsack still doesn't know about color contention between
- * the cards it plans together - colorAffordable only checks "a source
- * exists" per card independently, so it can plan two single-R-pip cards
- * with only one Mountain on the battlefield. Fixed via a bipartite-
- * matching feasibility check (colorFeasibleTogether) over the chosen
- * subset as a whole, repairing infeasible plans by dropping the least
- * valuable colored offender until what's left is jointly payable.
+ * The CMC-only knapsack doesn't know about color contention between the
+ * cards it plans together - colorAffordable only checks "a source
+ * exists" per card independently, so it can plan a {B}{B} card with only
+ * one black source, or two single-R-pip cards sharing one Mountain.
+ * Verified via a bipartite-matching feasibility check
+ * (colorFeasibleTogether) over the knapsack's chosen subset; an
+ * infeasible result excludes the least valuable colored offender from
+ * the candidate pool entirely and re-solves the knapsack from scratch,
+ * rather than just trimming that one subset - trimming alone can empty
+ * out to nothing and give up even when a cheaper, perfectly castable
+ * card was sitting right there in the candidate pool the whole time.
  */
 public class GenericSpellSequencer implements SpellSequencer {
     @Override
@@ -118,25 +122,77 @@ public class GenericSpellSequencer implements SpellSequencer {
         if (candidates.isEmpty()) {
             return null;
         }
-
-        // 0/1 knapsack: dp[i][c] = best total value using only the first
-        // i candidates with total cost <= c.
         int n = candidates.size();
+
+        // The CMC-only knapsack can plan a card (or combination of cards)
+        // that's individually colorAffordable (a source merely *exists*
+        // per needed color) but isn't really jointly payable - e.g. a
+        // single {B}{B} card with only one black source on the
+        // battlefield, or two single-R-pip cards sharing one Mountain.
+        // If the optimal subset turns out infeasible, the fix is NOT to
+        // just shrink that one subset and give up when it hits empty -
+        // that throws away perfectly castable cheaper cards that simply
+        // weren't part of *this* optimal combination (e.g. a 5-mana
+        // creature needing a color we lack two of, sitting next to a
+        // 2-mana creature that's completely fine, but never reconsidered
+        // once the 5-drop's subset got trimmed to nothing). Instead,
+        // permanently exclude the least valuable colored offender from
+        // the *candidate pool* and re-solve the knapsack from scratch -
+        // repeating until the freshly re-optimized subset is itself
+        // jointly payable, or no candidates remain.
+        Set<Integer> excludedIndices = new java.util.HashSet<>();
+        while (true) {
+            List<Integer> chosen = solveKnapsack(n, costs, values, availableMana, excludedIndices);
+            if (chosen.isEmpty()) {
+                return null;
+            }
+            if (colorFeasibleTogether(chosen, candidates, castableIds, manaSources)) {
+                // Cast the most expensive chosen item first - mostly a
+                // matter of sequencing sanity (bigger effects landing
+                // before smaller ones), not load-bearing for the total
+                // value achieved.
+                int bestIdx = chosen.get(0);
+                for (int idx : chosen) {
+                    if (costs.get(idx) > costs.get(bestIdx)) {
+                        bestIdx = idx;
+                    }
+                }
+                return candidates.get(bestIdx);
+            }
+
+            int worst = -1;
+            for (int idx : chosen) {
+                CardStateView card = castableIds.get(candidates.get(idx).cardId);
+                if (ManaUtils.colorPipCounts(card.manaCost).isEmpty()) {
+                    continue; // excluding a colorless card can't fix color contention
+                }
+                if (worst == -1 || values.get(idx) < values.get(worst)) {
+                    worst = idx;
+                }
+            }
+            if (worst == -1) {
+                return null; // nothing colored left to exclude - shouldn't happen given the per-card gate already passed, but don't loop forever
+            }
+            excludedIndices.add(worst);
+        }
+    }
+
+    /** 0/1 knapsack restricted to candidates not in excludedIndices -
+     * excluded items are simply never affordable in the DP, which keeps
+     * this a plain re-solve rather than needing a separate code path. */
+    private List<Integer> solveKnapsack(int n, List<Integer> costs, List<Double> values, int availableMana, Set<Integer> excludedIndices) {
         double[][] dp = new double[n + 1][availableMana + 1];
         for (int i = 1; i <= n; i++) {
             int cost = costs.get(i - 1);
             double value = values.get(i - 1);
+            boolean excluded = excludedIndices.contains(i - 1);
             for (int c = 0; c <= availableMana; c++) {
                 dp[i][c] = dp[i - 1][c];
-                if (cost <= c) {
+                if (!excluded && cost <= c) {
                     dp[i][c] = Math.max(dp[i][c], dp[i - 1][c - cost] + value);
                 }
             }
         }
-
-        // Backtrack to recover which candidates the optimal plan actually
-        // includes - any single one of them is a correct next move, since
-        // re-solving after casting it reproduces the rest of the plan.
         List<Integer> chosen = new ArrayList<>();
         int c = availableMana;
         for (int i = n; i >= 1; i--) {
@@ -145,48 +201,7 @@ public class GenericSpellSequencer implements SpellSequencer {
                 c -= costs.get(i - 1);
             }
         }
-        if (chosen.isEmpty()) {
-            return null;
-        }
-
-        // The CMC-only knapsack above can plan two cards that are each
-        // individually castable (colorAffordable just checks "a source
-        // exists" per card) but jointly aren't - e.g. two single-R-pip
-        // cards with only one Mountain. Repeatedly drop the least
-        // valuable colored card from the plan until what's left is
-        // actually jointly payable (verified via bipartite matching:
-        // can every required colored pip across the whole chosen set be
-        // assigned to a distinct untapped source?).
-        while (!chosen.isEmpty() && !colorFeasibleTogether(chosen, candidates, castableIds, manaSources)) {
-            int worst = -1;
-            for (int idx : chosen) {
-                CardStateView card = castableIds.get(candidates.get(idx).cardId);
-                if (ManaUtils.colorPipCounts(card.manaCost).isEmpty()) {
-                    continue; // dropping a colorless card can't fix color contention
-                }
-                if (worst == -1 || values.get(idx) < values.get(worst)) {
-                    worst = idx;
-                }
-            }
-            if (worst == -1) {
-                break; // nothing colored left to drop - shouldn't happen given the per-card gate already passed, but don't loop forever
-            }
-            chosen.remove(Integer.valueOf(worst));
-        }
-        if (chosen.isEmpty()) {
-            return null;
-        }
-
-        // Cast the most expensive chosen item first - mostly a matter of
-        // sequencing sanity (bigger effects landing before smaller ones),
-        // not load-bearing for the total value achieved.
-        int bestIdx = chosen.get(0);
-        for (int idx : chosen) {
-            if (costs.get(idx) > costs.get(bestIdx)) {
-                bestIdx = idx;
-            }
-        }
-        return candidates.get(bestIdx);
+        return chosen;
     }
 
     private boolean colorAffordable(CardStateView card, List<CardStateView> manaSources) {
