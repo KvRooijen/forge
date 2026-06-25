@@ -28,6 +28,13 @@ public class DecisionRequest {
      * which need different logic (e.g. "worst card", not "most
      * threatening") and shouldn't be treated as a targeting decision. */
     public String targetIntent;
+    /** Only meaningful for DECLARE_ATTACKERS: the name of whichever
+     * player this combat is actually against, resolved from the
+     * defender even when it's a planeswalker/battle rather than the
+     * player directly (their life total is still what attacking *them*
+     * threatens) - lets a strategy reason about a specific opponent's
+     * board/life instead of guessing which PlayerStateView is relevant. */
+    public String defenderName;
 
     public DecisionRequest() { }
 

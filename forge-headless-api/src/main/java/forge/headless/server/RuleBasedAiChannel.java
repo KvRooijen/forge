@@ -61,7 +61,7 @@ public class RuleBasedAiChannel implements RemoteChannel {
                 response.booleanValue = brain.triggerStrategy.confirm(state, request.prompt);
                 break;
             case "DECLARE_ATTACKERS":
-                response.chosenIds = brain.attackStrategy.chooseAttackers(options, state);
+                response.chosenIds = brain.attackStrategy.chooseAttackers(options, state, request.defenderName);
                 break;
             case "CHOOSE_SPELL_ABILITY":
                 response.chosenIds = chooseSpellAbility(options, state);

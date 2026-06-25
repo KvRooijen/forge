@@ -633,7 +633,17 @@ public class RemotePlayerController extends PlayerController {
         if (candidates.isEmpty()) {
             return;
         }
-        DecisionResponse resp = ask("DECLARE_ATTACKERS", "Declare attackers", options);
+        // Resolve to whichever player's life total this attack actually
+        // threatens - a planeswalker/battle defender doesn't have its own
+        // life total, but its controller's life is still what attacking
+        // *them* (the alternative defender choice) would threaten, so
+        // that's the meaningful "who is this combat against" signal for
+        // lethal/combat-math purposes.
+        Player defendingPlayer = defender instanceof Player p ? p
+                : defender instanceof Card c ? c.getController() : null;
+        DecisionRequest req = new DecisionRequest(UUID.randomUUID().toString(), "DECLARE_ATTACKERS", "Declare attackers", options, safeBuildStateView(player));
+        req.defenderName = defendingPlayer != null ? defendingPlayer.getName() : null;
+        DecisionResponse resp = channel.ask(req);
         if (resp.chosenIds == null) {
             return;
         }
