@@ -230,7 +230,7 @@ public class BatchRunner {
         int gamesPerMatchup = intArg(args, "--games-per-matchup", 10);
         String poolArg = stringArg(args, "--deck-pool", null);
         List<String> pool = poolArg != null ? List.of(poolArg.split(","))
-                : List.of("Veloci-Ramp-Tor [LCC] [2023].dck", "Miracle Worker [DSC] [2024].dck",
+                : List.of("Veloci-Ramp-Tor [LCC] [2023].dck", "Sultai Arisen [TDC] [2025].dck",
                           "Temur Roar [TDC] [2025].dck", "Explorers of the Deep [LCC] [2023].dck");
 
         List<GameSpec> games = new ArrayList<>();
@@ -345,7 +345,7 @@ public class BatchRunner {
         long totalGameMs = 0;
         Map<String, int[]> winsByAiType = new LinkedHashMap<>(); // [wins, games]
         Map<String, int[]> winsBySeat = new LinkedHashMap<>();
-        Pattern aiPrefix = Pattern.compile("^([A-Z_]+) \\(");
+        Pattern aiPrefix = Pattern.compile("^([A-Z0-9_]+) \\(");
 
         for (GameResult r : results) {
             totalGameMs += r.elapsedMs();

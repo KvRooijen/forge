@@ -36,6 +36,16 @@ public enum AiPlayerType {
         public LobbyPlayer createLobbyPlayer(String seatName) {
             return new LobbyPlayerAi(seatName, null);
         }
+    },
+    /** Successor to SIMPLE_HEURISTIC - same protocol/channel shape, but
+     * decision-making is modular per category (see HeuristicAiBrain)
+     * instead of one flat switch, so categories can be elaborated or
+     * swapped for deck-specific versions independently. */
+    RULE_BASED_V2 {
+        @Override
+        public LobbyPlayer createLobbyPlayer(String seatName) {
+            return new LobbyPlayerRemote(seatName, new RuleBasedAiChannel(), null);
+        }
     };
 
     public abstract LobbyPlayer createLobbyPlayer(String seatName);

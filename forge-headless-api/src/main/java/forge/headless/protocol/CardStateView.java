@@ -49,6 +49,17 @@ public class CardStateView {
      * again (CR 903.8: +{2} per previous cast from the command zone this
      * game) - null for non-commander cards or when the tax is 0. */
     public Integer commanderTax;
+    /** Colors (W/U/B/R/G/C) this card's mana abilities can actually
+     * produce, from Card.canProduceColorMana() - real engine logic, not a
+     * name-based guess, so it's accurate for duals/triomes/signets/Command
+     * Tower, not just the 5 basics. Empty for cards with no mana ability. */
+    public List<String> producedColors;
+    /** Best-effort "this permanent enters the battlefield tapped" signal
+     * (checks ReplacementEffects for the standard "CARDNAME enters
+     * tapped." description, same heuristic forge-ai's own land-choice
+     * logic uses and acknowledges as imperfect - conditional taplands
+     * that only sometimes enter tapped aren't distinguished here). */
+    public boolean entersTapped;
 
     public static class RoomDoor {
         public String name;
@@ -69,7 +80,7 @@ public class CardStateView {
             boolean sick, Map<String, Integer> counters, boolean attacking,
             String attackingTarget, String blockingAttacker, boolean producesMana,
             RoomDoor leftDoor, RoomDoor rightDoor, List<String> keywords,
-            String attachedToId, Integer commanderTax) {
+            String attachedToId, Integer commanderTax, List<String> producedColors, boolean entersTapped) {
         this.id = id;
         this.name = name;
         this.manaCost = manaCost;
@@ -89,5 +100,7 @@ public class CardStateView {
         this.keywords = keywords;
         this.attachedToId = attachedToId;
         this.commanderTax = commanderTax;
+        this.producedColors = producedColors;
+        this.entersTapped = entersTapped;
     }
 }

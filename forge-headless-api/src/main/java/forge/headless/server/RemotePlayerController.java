@@ -536,6 +536,22 @@ public class RemotePlayerController extends PlayerController {
             int tax = c.getOwner().getCommanderCast(c) * 2;
             commanderTax = tax > 0 ? tax : null;
         }
+        List<String> producedColors = new ArrayList<>();
+        for (String code : new String[] {"W", "U", "B", "R", "G", "C"}) {
+            if (c.canProduceColorMana(java.util.Set.of(code))) {
+                producedColors.add(code);
+            }
+        }
+        // same "TODO: improve detection of taplands" heuristic forge-ai's
+        // own AiController uses for land-choice decisions - good enough to
+        // catch the common always-tapped case, not conditional taplands.
+        boolean entersTapped = false;
+        for (forge.game.replacement.ReplacementEffect repl : c.getReplacementEffects()) {
+            if (repl.getParamOrDefault("Description", "").equals("CARDNAME enters tapped.")) {
+                entersTapped = true;
+                break;
+            }
+        }
         return new CardStateView(
                 String.valueOf(c.getId()),
                 c.getName(),
@@ -555,7 +571,7 @@ public class RemotePlayerController extends PlayerController {
                 c.isRoom() ? roomDoorOf(c, forge.card.CardStateName.RightSplit) : null,
                 keywords,
                 attachedTo != null ? String.valueOf(attachedTo.getId()) : null,
-                commanderTax);
+                commanderTax, producedColors, entersTapped);
     }
 
     /** CardStateName.LeftSplit/RightSplit are the two fixed door slots a
