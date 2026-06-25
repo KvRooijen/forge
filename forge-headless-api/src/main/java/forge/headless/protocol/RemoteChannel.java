@@ -8,4 +8,14 @@ package forge.headless.protocol;
  */
 public interface RemoteChannel {
     DecisionResponse ask(DecisionRequest request);
+
+    /** Whether this channel actually answers DECLARE_BLOCKERS itself.
+     * False by default - RemotePlayerController.declareBlockers falls
+     * through to forge-ai's own blocking math for any channel that
+     * doesn't override this, since there's no point sending a request
+     * nothing will meaningfully answer. WebSocketChannel and
+     * RuleBasedAiChannel override this to true. */
+    default boolean supportsBlocking() {
+        return false;
+    }
 }

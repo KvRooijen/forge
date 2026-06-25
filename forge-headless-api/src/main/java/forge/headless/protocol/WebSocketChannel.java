@@ -71,4 +71,9 @@ public class WebSocketChannel implements RemoteChannel {
             // session likely closed/disconnected - nothing to do
         }
     }
+
+    @Override
+    public boolean supportsBlocking() {
+        return true;
+    }
 }

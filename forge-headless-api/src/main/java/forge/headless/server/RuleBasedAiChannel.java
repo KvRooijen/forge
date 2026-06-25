@@ -43,6 +43,11 @@ public class RuleBasedAiChannel implements RemoteChannel {
     }
 
     @Override
+    public boolean supportsBlocking() {
+        return true;
+    }
+
+    @Override
     public DecisionResponse ask(DecisionRequest request) {
         DecisionResponse response = new DecisionResponse();
         response.id = request.id;
@@ -62,6 +67,9 @@ public class RuleBasedAiChannel implements RemoteChannel {
                 break;
             case "DECLARE_ATTACKERS":
                 response.chosenIds = brain.attackStrategy.chooseAttackers(options, state, request.defenderName);
+                break;
+            case "DECLARE_BLOCKERS":
+                response.groupChoices = brain.blockStrategy.chooseBlocks(request.groups != null ? request.groups : List.of(), state);
                 break;
             case "CHOOSE_SPELL_ABILITY":
                 response.chosenIds = chooseSpellAbility(options, state);

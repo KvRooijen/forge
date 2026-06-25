@@ -18,6 +18,7 @@ public class HeuristicAiBrain {
     public final TriggerStrategy triggerStrategy;
     public final MulliganStrategy mulliganStrategy;
     public final TargetingStrategy targetingStrategy;
+    public final BlockStrategy blockStrategy;
 
     private HeuristicAiBrain(Builder b) {
         this.threatAssessor = b.threatAssessor;
@@ -29,6 +30,7 @@ public class HeuristicAiBrain {
         this.triggerStrategy = b.triggerStrategy;
         this.mulliganStrategy = b.mulliganStrategy;
         this.targetingStrategy = b.targetingStrategy;
+        this.blockStrategy = b.blockStrategy;
     }
 
     public static Builder builder() {
@@ -49,6 +51,7 @@ public class HeuristicAiBrain {
         private TriggerStrategy triggerStrategy = new GenericTriggerStrategy();
         private MulliganStrategy mulliganStrategy = new GenericMulliganStrategy();
         private TargetingStrategy targetingStrategy = new GenericTargetingStrategy();
+        private BlockStrategy blockStrategy = new GenericBlockStrategy();
 
         public Builder threatAssessor(ThreatAssessor v) { this.threatAssessor = v; return this; }
         public Builder landPlayStrategy(LandPlayStrategy v) { this.landPlayStrategy = v; return this; }
@@ -59,6 +62,7 @@ public class HeuristicAiBrain {
         public Builder triggerStrategy(TriggerStrategy v) { this.triggerStrategy = v; return this; }
         public Builder mulliganStrategy(MulliganStrategy v) { this.mulliganStrategy = v; return this; }
         public Builder targetingStrategy(TargetingStrategy v) { this.targetingStrategy = v; return this; }
+        public Builder blockStrategy(BlockStrategy v) { this.blockStrategy = v; return this; }
 
         public HeuristicAiBrain build() {
             return new HeuristicAiBrain(this);

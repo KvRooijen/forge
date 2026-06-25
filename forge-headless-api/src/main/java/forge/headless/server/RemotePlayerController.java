@@ -1117,13 +1117,16 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public void declareBlockers(Player defender, Combat combat) {
-        // The AI seat keeps using forge-ai's own (already decent) block
-        // logic - InProcessAiChannel's heuristics don't cover blocking yet,
-        // and there's no human on that end to ask. The human seat gets asked
-        // for real: this previously always fell through to the embedded
-        // delegate for every seat, including the human's own defense,
-        // which meant blocking was never actually interactive.
-        if (!(channel instanceof forge.headless.protocol.WebSocketChannel)) {
+        // Falls through to forge-ai's own block logic for any channel
+        // that doesn't actually answer blocking decisions itself (see
+        // RemoteChannel.supportsBlocking) - InProcessAiChannel's
+        // heuristics never covered blocking, so it still delegates.
+        // RuleBasedAiChannel and the human's WebSocketChannel both
+        // override supportsBlocking to true and get asked for real: this
+        // previously always fell through to the embedded delegate for
+        // every seat, including the human's own defense, which meant
+        // blocking was never actually interactive.
+        if (!channel.supportsBlocking()) {
             withDelegateVoid(() -> delegate.declareBlockers(defender, combat));
             pushSpectatorUpdate();
             return;
