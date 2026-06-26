@@ -96,6 +96,30 @@ public class DecisionRequest {
          * whenever the effect's value can't be classified with confidence
          * - the AI falls back to a CMC proxy for those, same as before. */
         public String spellRole;
+        /** The AI's own computed value for this option, when one was
+         * already being computed anyway for ranking purposes - e.g. a
+         * spell's board-aware value (GenericSpellSequencer.valueOf) or a
+         * creature's CreatureValue. Purely informational: nothing reads
+         * this back, it exists so DecisionLogger/DecisionLogSummarizer can
+         * show *why* an option looked good or bad, not just what was
+         * chosen. Null wherever no such value was computed (e.g. land
+         * options, mana-source choices). */
+        public Double value;
+        /** Only set on CHOOSE_SPELL_ABILITY non-land options that name a
+         * real card (GenericSpellSequencer.planBestSubset): whether the AI
+         * itself currently considers this individually affordable (CMC vs.
+         * untapped mana sources, and a color source exists for each pip) -
+         * the same per-card gate the AI uses before a card is even
+         * considered as a knapsack candidate. Doesn't account for
+         * contention between multiple spells cast the same turn (that's
+         * colorFeasibleTogether, checked only against whichever specific
+         * combination the knapsack actually picks, not per-option) - so
+         * "true" here means "payable on its own", not "guaranteed to be
+         * the one played". Purely informational like value above - without
+         * it, a high-value option in the log can look like an obvious miss
+         * when it actually just wasn't payable yet. Null for anything that
+         * isn't a real spell candidate (lands, mana abilities, End Turn). */
+        public Boolean castable;
 
         public Option() { }
 

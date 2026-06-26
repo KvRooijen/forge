@@ -162,11 +162,19 @@ public class GenericSpellSequencer implements SpellSequencer {
             CardStateView card = castableIds.get(cardId);
             int cmc = ManaUtils.manaValue(card.manaCost);
             if (cmc > availableMana || !colorAffordable(card, manaSources)) {
+                // Purely informational - see DecisionRequest.Option.castable's
+                // javadoc - doesn't change anything else here.
+                o.castable = false;
                 continue;
             }
+            double value = valueOf(o, card, totalManaSources, opponentCreatures, myCreatures, pressureRatio);
             candidates.add(o);
             costs.add(cmc);
-            values.add(valueOf(o, card, totalManaSources, opponentCreatures, myCreatures, pressureRatio));
+            values.add(value);
+            // Purely informational - see DecisionRequest.Option.value's
+            // javadoc - doesn't feed back into the knapsack itself.
+            o.value = value;
+            o.castable = true;
         }
         if (candidates.isEmpty()) {
             return null;

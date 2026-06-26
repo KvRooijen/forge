@@ -103,9 +103,78 @@ public class RuleBasedAiChannel implements RemoteChannel {
                 }
         }
         if (DecisionLogger.isEnabled()) {
+            enrichOptionValuesForLogging(request);
             DecisionLogger.log(seatChannelId, seatName, request, response);
         }
         return response;
+    }
+
+    /**
+     * Backfills DecisionRequest.Option.value with CreatureValue wherever a
+     * strategy didn't already set a richer value itself (e.g.
+     * GenericSpellSequencer's board-aware spell value) - covers attack/
+     * block candidates and targeting/discard-style CHOOSE_LIST options for
+     * free, since they all already key their own ranking off
+     * CreatureValue.of(...) for this exact card. DECLARE_ATTACKERS options
+     * specifically carry only a cardId, not the full CardStateView (a
+     * deliberately lighter wire payload sent on every single attack
+     * decision, logging or not - see RemotePlayerController.declareAttackers),
+     * so for those this falls back to looking the id up in the state's own
+     * battlefield, same as GenericAttackStrategy's internal byId map
+     * already does for ranking. Only touches options, never changes any
+     * decision - this exists purely so logged records show the value the
+     * AI was actually weighing, not just what got picked. Skipped entirely
+     * when logging is off.
+     */
+    private static void enrichOptionValuesForLogging(DecisionRequest request) {
+        java.util.Map<String, forge.headless.protocol.CardStateView> byId = cardsById(request.state);
+        enrichList(request.options, byId);
+        if (request.groups != null) {
+            for (DecisionRequest.Group g : request.groups) {
+                enrichList(g.options, byId);
+            }
+        }
+    }
+
+    private static java.util.Map<String, forge.headless.protocol.CardStateView> cardsById(GameStateView state) {
+        java.util.Map<String, forge.headless.protocol.CardStateView> byId = new java.util.HashMap<>();
+        if (state == null || state.players == null) {
+            return byId;
+        }
+        for (var p : state.players) {
+            // p.hand is deliberately null for any player who isn't the
+            // viewer (hidden information) - addZone tolerates that.
+            addZone(byId, p.battlefield);
+            addZone(byId, p.hand);
+            addZone(byId, p.graveyard);
+            addZone(byId, p.exile);
+            addZone(byId, p.commandZone);
+        }
+        return byId;
+    }
+
+    private static void addZone(java.util.Map<String, forge.headless.protocol.CardStateView> byId, List<forge.headless.protocol.CardStateView> zone) {
+        if (zone == null) {
+            return;
+        }
+        for (forge.headless.protocol.CardStateView c : zone) {
+            byId.put(c.id, c);
+        }
+    }
+
+    private static void enrichList(List<DecisionRequest.Option> options, java.util.Map<String, forge.headless.protocol.CardStateView> byId) {
+        if (options == null) {
+            return;
+        }
+        for (DecisionRequest.Option o : options) {
+            if (o.value != null) {
+                continue;
+            }
+            forge.headless.protocol.CardStateView card = o.card != null ? o.card : byId.get(o.cardId);
+            if (card != null) {
+                o.value = forge.headless.server.ai.CreatureValue.of(card);
+            }
+        }
     }
 
     private void resetPerTurnStateIfNewTurn(GameStateView state) {

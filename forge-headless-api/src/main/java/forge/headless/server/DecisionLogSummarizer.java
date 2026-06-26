@@ -83,9 +83,9 @@ public final class DecisionLogSummarizer {
         List<String> optionLabels = new ArrayList<>();
         java.util.Map<String, String> idToLabel = new java.util.HashMap<>();
         for (JsonNode o : req.path("options")) {
-            String label = o.path("label").asText("?");
-            optionLabels.add(label);
-            idToLabel.put(o.path("id").asText(""), label);
+            String shownLabel = annotateOption(o.path("label").asText("?"), o);
+            optionLabels.add(shownLabel);
+            idToLabel.put(o.path("id").asText(""), shownLabel);
         }
         if (!optionLabels.isEmpty()) {
             sb.append("  options: ").append(String.join(" | ", optionLabels)).append("\n");
@@ -95,6 +95,21 @@ public final class DecisionLogSummarizer {
         }
         if (!req.path("mulliganCardsToReturn").isMissingNode() && !req.path("mulliganCardsToReturn").isNull()) {
             sb.append("  cardsToReturn=").append(req.path("mulliganCardsToReturn").asInt()).append("\n");
+        }
+        // DECLARE_BLOCKERS ships one group of blocker candidates per
+        // attacker instead of a flat options list - render each group's
+        // attacker and its blocker candidates (with value) the same way.
+        java.util.Map<String, String> groupIdToAttackerName = new java.util.HashMap<>();
+        for (JsonNode g : req.path("groups")) {
+            String attackerName = g.path("attacker").path("name").asText("?");
+            groupIdToAttackerName.put(g.path("id").asText(""), attackerName);
+            List<String> blockerLabels = new ArrayList<>();
+            for (JsonNode o : g.path("options")) {
+                String shownLabel = annotateOption(o.path("label").asText("?"), o);
+                blockerLabels.add(shownLabel);
+                idToLabel.put(o.path("id").asText(""), shownLabel);
+            }
+            sb.append("  group[").append(attackerName).append("]: ").append(String.join(" | ", blockerLabels)).append("\n");
         }
 
         JsonNode resp = rec.path("response");
@@ -108,7 +123,17 @@ public final class DecisionLogSummarizer {
             }
             sb.append(String.join(", ", chosenLabels));
         } else if (resp.path("groupChoices").size() > 0) {
-            sb.append(resp.path("groupChoices").toString());
+            List<String> parts = new ArrayList<>();
+            java.util.Iterator<String> fields = resp.path("groupChoices").fieldNames();
+            while (fields.hasNext()) {
+                String groupId = fields.next();
+                List<String> blockers = new ArrayList<>();
+                for (JsonNode id : resp.path("groupChoices").path(groupId)) {
+                    blockers.add(idToLabel.getOrDefault(id.asText(), id.asText()));
+                }
+                parts.add(groupIdToAttackerName.getOrDefault(groupId, groupId) + " <- [" + String.join(", ", blockers) + "]");
+            }
+            sb.append(String.join("; ", parts));
         } else {
             sb.append("(nothing/pass)");
         }
@@ -123,6 +148,28 @@ public final class DecisionLogSummarizer {
             }
         }
         return players.isEmpty() ? com.fasterxml.jackson.databind.node.MissingNode.getInstance() : players.get(0);
+    }
+
+    private static double round1(double v) {
+        return Math.round(v * 10) / 10.0;
+    }
+
+    /** Appends value=... and, when the AI actually classified it (real
+     * spell candidates only - lands/mana abilities/End Turn are left
+     * alone), a CASTABLE/NOT CASTABLE flag - so a high-value option in the
+     * transcript doesn't look like a missed play when it just wasn't
+     * payable yet. */
+    private static String annotateOption(String label, JsonNode o) {
+        String shown = label;
+        JsonNode value = o.path("value");
+        if (!value.isMissingNode() && !value.isNull()) {
+            shown += " (value=" + round1(value.asDouble()) + ")";
+        }
+        JsonNode castable = o.path("castable");
+        if (!castable.isMissingNode() && !castable.isNull()) {
+            shown += castable.asBoolean() ? " [CASTABLE]" : " [NOT CASTABLE]";
+        }
+        return shown;
     }
 
     private static String cardNames(JsonNode cards) {
