@@ -46,6 +46,7 @@ import forge.game.staticability.StaticAbility;
 import forge.game.trigger.WrappedAbility;
 import forge.game.zone.PlayerZone;
 import forge.game.zone.ZoneType;
+import forge.headless.server.ai.SpellRoleValue;
 import forge.headless.protocol.CardStateView;
 import forge.headless.protocol.DecisionRequest;
 import forge.headless.protocol.DecisionResponse;
@@ -851,25 +852,43 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public Integer announceRequirements(SpellAbility ability, int min, int max, String announce) {
-        // Backs X-cost announcement ("announce" is typically "X") - was
-        // hardcoded to min (almost always 0), so every X spell was always
-        // cast for X=0 regardless of available mana.
+        // Backs X-cost announcement ("announce" is typically "X").
         //
-        // For cards with no explicit XMax (the common case - X is normally
-        // only bounded by available mana, computed dynamically), max comes
-        // in as Integer.MAX_VALUE from AbilityUtils.getAnnouncementBounds.
-        // chooseNumber's int-range overload below materializes every value
-        // from min to max as a checklist, so an unclamped MAX_VALUE hangs
-        // the game trying to build a multi-billion-entry list (found via
-        // Entreat the Angels - any X-cost card with no XMax would hit this
-        // the same way). Mirror PlayerControllerHuman's real fix: clamp by
-        // how much X the player could actually pay for.
+        // This used to route X through chooseNumber, which (via the generic
+        // list-choice strategy) silently picks the *first* offered value -
+        // i.e. min, almost always 0. So despite the bounds math below being
+        // correct, every X spell was still announced as X=0: Hydras entered
+        // as 0/0 and died, X burn/draw/wipe did nothing. A whole class of
+        // powerful Commander cards was being thrown away. Now X is sized to
+        // the largest value actually payable with available mana.
+        //
+        // ComputerUtilMana.determineLeftoverMana is the same mana-math
+        // helper forge-ai uses to size X: it incrementally tests
+        // canPayManaCost and respects XMax/AIXMax. It's a pure
+        // affordability calculation, not a decision/evaluator class, so
+        // using it doesn't reintroduce the forge-ai *decision* coupling
+        // this AI deliberately avoids - it's the equivalent of a library
+        // call for "how much X can I afford". "Max affordable" is a strong,
+        // simple default (bigger Hydra, more damage, bigger wipe); it isn't
+        // always theoretically optimal (occasionally holding mana back is
+        // better), but it's enormously better than 0 and matches how
+        // forge-ai itself sizes most X spells.
         Cost cost = ability.getPayCosts();
-        if ("X".equals(announce) && cost != null) {
-            Integer costX = cost.getMaxForNonManaX(ability, player, false);
-            if (costX != null) {
-                max = Math.min(max, costX);
+        if ("X".equals(announce)) {
+            int affordableX = forge.ai.ComputerUtilMana.determineLeftoverMana(ability, player, false);
+            int x = Math.max(min, affordableX);
+            // Respect an explicit non-mana-X upper bound too (e.g. "X can't
+            // exceed the number of creatures you control").
+            if (cost != null) {
+                Integer costX = cost.getMaxForNonManaX(ability, player, false);
+                if (costX != null) {
+                    x = Math.min(x, costX);
+                }
             }
+            if (max != Integer.MAX_VALUE) {
+                x = Math.min(x, max);
+            }
+            return x >= min ? x : null;
         }
         if (min > max) {
             return null;
@@ -1827,24 +1846,95 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public List<AbilitySub> chooseModeForAbility(SpellAbility sa, List<AbilitySub> possible, int min, int num, boolean allowRepeat) {
+        // Was: chooseFromList(...), which (via the generic list-choice
+        // strategy) just takes the *first* min/num modes in source order -
+        // every modal spell (charms, confluences, modal removal) always
+        // picked mode #1 regardless of the board. Now each mode is scored
+        // by the same board-aware role valuation the spell sequencer uses
+        // (SpellRoleValue: a "destroy target creature" mode is worth its
+        // best target, ~0 into an empty board; a sweeper mode is negative
+        // when I'm ahead; draw is a steady mid-value), so we pick the modes
+        // that actually do something useful right now. Modes whose effect
+        // this AI can't yet classify score 0 and fall back to source order
+        // among themselves - never worse than the old first-N behavior.
+        double[] scores = scoreModes(possible);
         if (!allowRepeat) {
             int count = Math.min(num, possible.size());
-            return chooseFromList("Choose a mode", possible, Math.min(min, count), count,
-                    AbilitySub::toString, null);
+            int required = Math.min(min, count);
+            return pickTopModes(possible, scores, count, required);
         }
-        // Fiery Confluence-style "choose N modes, repeats allowed" - a
-        // single bulk multi-select over `possible` can't express picking
-        // the same entry twice, so ask one mode at a time instead, always
-        // offering the full list back each time.
-        List<AbilitySub> chosen = new ArrayList<>();
-        for (int i = 0; i < num; i++) {
-            int pickMin = chosen.size() < min ? 1 : 0;
-            List<AbilitySub> pick = chooseFromList("Choose a mode (" + (i + 1) + "/" + num + ")", possible,
-                    pickMin, 1, AbilitySub::toString, null);
-            if (pick.isEmpty()) {
-                break;
+        // "Choose N modes, repeats allowed" (Fiery/Mystic Confluence): a
+        // static board snapshot scores every copy of a mode the same, so
+        // the single best-scoring mode is the natural repeated pick. If
+        // nothing scores positively and none are required, decline.
+        int bestIdx = -1;
+        for (int i = 0; i < possible.size(); i++) {
+            if (bestIdx == -1 || scores[i] > scores[bestIdx]) {
+                bestIdx = i;
             }
-            chosen.add(pick.get(0));
+        }
+        List<AbilitySub> chosen = new ArrayList<>();
+        if (bestIdx == -1) {
+            return chosen;
+        }
+        for (int i = 0; i < num; i++) {
+            if (i >= min && scores[bestIdx] <= 0) {
+                break; // optional extra copies only worth taking if beneficial
+            }
+            chosen.add(possible.get(bestIdx));
+        }
+        return chosen;
+    }
+
+    /** Board-aware score per modal mode, by the same REMOVAL/SWEEPER/DRAW
+     * valuation the spell sequencer uses for whole spells - so a mode is
+     * judged identically whether it's a standalone spell or one option of
+     * a modal one. Unclassifiable modes score 0 (fall back to source
+     * order), never negative, so this can't do worse than the prior
+     * first-N pick on modes we can't read. */
+    private double[] scoreModes(List<AbilitySub> possible) {
+        List<CardStateView> mine = new ArrayList<>();
+        List<CardStateView> opp = new ArrayList<>();
+        for (Player pl : player.getGame().getPlayers()) {
+            List<CardStateView> bucket = pl == player ? mine : opp;
+            for (Card c : pl.getCreaturesInPlay()) {
+                bucket.add(toCardView(c));
+            }
+        }
+        double[] scores = new double[possible.size()];
+        for (int i = 0; i < possible.size(); i++) {
+            String role = classifyApiRole(possible.get(i).getApi(), true);
+            scores[i] = SpellRoleValue.of(role, opp, mine);
+        }
+        return scores;
+    }
+
+    /** Picks the `count` highest-scoring modes (always at least
+     * `required`, and beyond that only modes that score positively),
+     * returned in the spell's original mode order since some modal effects
+     * apply in listed order. Ties keep source order (stable). */
+    private List<AbilitySub> pickTopModes(List<AbilitySub> possible, double[] scores, int count, int required) {
+        int n = possible.size();
+        List<Integer> order = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            order.add(i);
+        }
+        order.sort((a, b) -> {
+            int cmp = Double.compare(scores[b], scores[a]);
+            return cmp != 0 ? cmp : Integer.compare(a, b);
+        });
+        boolean[] take = new boolean[n];
+        for (int rank = 0; rank < count && rank < n; rank++) {
+            int idx = order.get(rank);
+            if (rank < required || scores[idx] > 0) {
+                take[idx] = true;
+            }
+        }
+        List<AbilitySub> chosen = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            if (take[i]) {
+                chosen.add(possible.get(i));
+            }
         }
         return chosen;
     }

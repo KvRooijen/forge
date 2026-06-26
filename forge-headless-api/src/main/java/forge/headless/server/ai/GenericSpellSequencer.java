@@ -416,50 +416,11 @@ public class GenericSpellSequencer implements SpellSequencer {
 
     /** The REMOVAL/SWEEPER/DRAW board-aware scoring shared between "what
      * does casting this spell do" and "what does this creature's own ETB
-     * trigger do" - same categories, same logic, whichever source the
-     * role classification came from. Returns 0 for RAMP (handled
-     * separately via the mana-source-count taper above, not here) and
-     * for null/unclassified. */
+     * trigger do" - delegates to SpellRoleValue so modal-mode selection
+     * (RemotePlayerController.chooseModeForAbility) values the exact same
+     * effect identically. Returns 0 for RAMP (handled separately via the
+     * mana-source-count taper above, not here) and for null/unclassified. */
     private double roleValue(String role, List<CardStateView> opponentCreatures, List<CardStateView> myCreatures) {
-        if ("REMOVAL".equals(role)) {
-            double bestTarget = 0;
-            for (CardStateView c : opponentCreatures) {
-                bestTarget = Math.max(bestTarget, CreatureValue.of(c));
-            }
-            // Genuinely zero, not a small positive floor: a positive value
-            // here would always win against the implicit "cast nothing"
-            // baseline whenever nothing else is competing for the mana -
-            // i.e. it would *guarantee* firing removal into an empty board
-            // exactly when there's no profitable target, the opposite of
-            // the intended effect. The knapsack's own tie-breaking already
-            // treats an exact-zero addition as "not worth including" (see
-            // solveKnapsack's reconstruction step - it only marks an item
-            // chosen on a strict value increase), so zero alone is enough
-            // to make a no-target removal spell correctly lose to passing,
-            // without needing any separate threshold/decline mechanism.
-            return bestTarget;
-        }
-        if ("SWEEPER".equals(role)) {
-            double opp = 0;
-            for (CardStateView c : opponentCreatures) {
-                opp += CreatureValue.of(c);
-            }
-            double mine = 0;
-            for (CardStateView c : myCreatures) {
-                mine += CreatureValue.of(c);
-            }
-            // Negative when I'd lose more than the opponent - the knapsack
-            // then simply never includes it (not-casting always scores
-            // higher), which is exactly "don't wipe when you're ahead".
-            return opp - mine;
-        }
-        if ("DRAW".equals(role)) {
-            // Roughly a mid-curve play's worth - competes with creatures
-            // without dominating them, so the AI refuels when there's
-            // nothing more impactful to do but doesn't draw instead of
-            // developing a threatening board.
-            return 3.0;
-        }
-        return 0;
+        return SpellRoleValue.of(role, opponentCreatures, myCreatures);
     }
 }
