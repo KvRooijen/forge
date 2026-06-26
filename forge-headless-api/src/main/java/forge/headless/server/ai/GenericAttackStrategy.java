@@ -11,42 +11,72 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Two real pieces of combat math instead of "attack with anything that
- * has power > 0": a lethal-line check (go all-in when the numbers say
- * this attack can just win outright), and per-creature safe/favorable
- * filtering otherwise (don't throw a creature into an obvious bad block
- * for nothing). Magic has no hidden battlefield information - every
- * opponent's creatures, power, toughness, and keywords are fully known
- * at declare-attackers time - so this is tractable straight from
- * CardStateView, no guessing required.
+ * Four pieces of combat math instead of "attack with anything that has
+ * power > 0": a lethal-line check (go all-in when the numbers say this
+ * attack can just win outright), a posture read (am I ahead, behind, or
+ * even - see Posture), crackback-aware blocker reservation (don't tap out
+ * into a counter-attack that kills me back), and per-creature safe/
+ * favorable filtering on whatever's left to send. Magic has no hidden
+ * battlefield information - every opponent's creatures, power, toughness,
+ * and keywords are fully known at declare-attackers time - so all of this
+ * is tractable straight from CardStateView, no guessing required.
  *
- * Both pieces deliberately stay conservative rather than fully solving
- * combat: hand contents (combat tricks, instant-speed removal) are
- * genuinely hidden information and aren't pretended away, trample's
- * excess-damage carryover isn't modeled (a trampler is treated as a
- * plain ground attacker), and the lethal check assumes the defender
- * blocks optimally (biggest unavoidable attackers first) rather than
- * searching every possible block assignment.
+ * Modeled on forge-ai's AiAttackController, specifically aiAggression
+ * (AiAttackController.java:1232-1264, a 0-5 posture read from force ratio
+ * and life totals) and notNeededAsBlockers (AiAttackController.java:355,
+ * which holds back exactly enough blockers to survive the opponent's next
+ * combat via a full block simulation - predictNextCombatsRemainingLife).
+ * Without either of these, the previous version of this class would
+ * happily tap the whole board into attacks and then lose to the
+ * counter-swing - very likely the single biggest leak in this AI's win
+ * rate against forge-ai (see PLAN.md Phase 4.28's audit).
  *
- * A third piece beyond per-creature safety: the defender's blockers are a
- * shared, exhaustible resource across every attacker I send, not an
- * independent risk per creature. If I have more "risky" attackers (ones
- * some blocker could cleanly kill) than they have blockers, they cannot
- * possibly assign a killer to all of them - some get through guaranteed,
- * regardless of which ones they pick - so it's worth sending all of them.
- * Without this, three risky attackers each individually "unsafe" against
- * a single shared potential killer blocker would all be declined, even
- * though that one blocker can only actually stop one of them.
+ * Deliberately a lighter-weight version of their idea, not a port of the
+ * mechanism: forge-ai actually simulates a full hypothetical combat
+ * (builds a Combat object, runs its own AiBlockController against it) to
+ * predict the crackback. We don't have a real Combat object to simulate
+ * against here (CardStateView is a flat DTO, not a live engine state), so
+ * the crackback check instead reuses this class's own existing
+ * isLethal() math, mirrored: "would the opponent's current board, against
+ * whichever of my creatures stay home to block, deal lethal-or-more
+ * damage to me next turn" - the same conservative guaranteed-unblocked +
+ * smallest-excess-through accounting already used for our own offense,
+ * just pointed in the other direction. Real combat tricks, instant-speed
+ * removal, and the opponent's own future draws aren't modeled - this is a
+ * snapshot of the current board, same caveat as the rest of this class.
+ *
+ * Posture also isn't forge-ai's 6-level aiAggression with its many
+ * matchup-specific conditions - just three buckets (DEFENSIVE/NORMAL/
+ * DESPERATE) from a board-value and life comparison, since that's the
+ * part of their model that most directly changes "how much should I risk
+ * by attacking", without trying to replicate every situational rule they
+ * have for it.
  */
 public class GenericAttackStrategy implements AttackStrategy {
+    private enum Posture {
+        /** Clearly ahead on board and life - no need to gamble, so the
+         * crackback check gets an extra safety margin rather than just
+         * "don't literally die". */
+        DEFENSIVE,
+        /** Even, or no clear edge either way - hold back exactly enough
+         * to not die to the crackback, same as forge-ai's baseline case. */
+        NORMAL,
+        /** Clearly behind on board and life - holding creatures back to
+         * "stay safe" doesn't matter if the slow game is already lost,
+         * so the crackback check is skipped entirely and everything
+         * that can profitably attack does. */
+        DESPERATE
+    }
+
     @Override
     public List<String> chooseAttackers(List<DecisionRequest.Option> options, GameStateView state, String defenderName) {
         Map<String, CardStateView> byId = AiUtils.cardsById(state);
+        PlayerStateView me = AiUtils.you(state);
         PlayerStateView defender = findPlayer(state, defenderName);
 
-        if (defender == null) {
-            // No resolvable defender info - fall back to the original
-            // simple rule rather than guessing at combat math blind.
+        if (defender == null || me == null) {
+            // No resolvable defender/self info - fall back to the
+            // original simple rule rather than guessing at combat math blind.
             List<String> chosen = new ArrayList<>();
             for (DecisionRequest.Option o : options) {
                 CardStateView card = o.cardId != null ? byId.get(o.cardId) : null;
@@ -79,17 +109,79 @@ public class GenericAttackStrategy implements AttackStrategy {
             return options.stream().map(o -> o.id).toList();
         }
 
-        List<DecisionRequest.Option> safe = new ArrayList<>();
-        List<DecisionRequest.Option> risky = new ArrayList<>();
+        Posture posture = readPosture(me, defender);
+
+        // The opponent's *full* creature count, not just their currently
+        // untapped ones - everything they have untaps again on their own
+        // turn, so a tapped creature today is still a real attacker in
+        // next turn's crackback.
+        List<CardStateView> opponentFullBoard = new ArrayList<>();
+        if (defender.battlefield != null) {
+            for (CardStateView c : defender.battlefield) {
+                if (c.typeLine != null && c.typeLine.contains("Creature")) {
+                    opponentFullBoard.add(c);
+                }
+            }
+        }
+
+        // Everything else on my board that ISN'T attacking is a
+        // potential blocker against the crackback. Vigilance creatures
+        // are excluded from "things I might need to hold back" entirely -
+        // they attack AND still block, so committing one to attack never
+        // costs any blocking capacity.
+        List<CardStateView> myBoard = me.battlefield != null ? me.battlefield : List.of();
+        List<CardStateView> potentialHomeDefense = new ArrayList<>();
+        for (CardStateView c : myBoard) {
+            if (c.typeLine != null && c.typeLine.contains("Creature") && !c.tapped
+                    && !hasKeyword(c.keywords, "Vigilance")) {
+                potentialHomeDefense.add(c);
+            }
+        }
+
+        // Greedily decide, in attack-value order, which non-vigilant
+        // attack candidates can be spared without losing the crackback
+        // check - the same idea as forge-ai's notNeededAsBlockers, just
+        // using this class's own isLethal() math mirrored at the
+        // opponent rather than a full block simulation.
+        List<DecisionRequest.Option> candidates = new ArrayList<>();
         for (DecisionRequest.Option o : options) {
             CardStateView card = o.cardId != null ? byId.get(o.cardId) : null;
-            if (card == null) {
+            if (card == null || (card.power != null ? card.power : 0) <= 0) {
                 continue;
             }
-            int power = card.power != null ? card.power : 0;
-            if (power <= 0) {
+            candidates.add(o);
+        }
+        candidates.sort(Comparator.comparingDouble((DecisionRequest.Option o) -> CreatureValue.of(byId.get(o.cardId))).reversed());
+
+        List<CardStateView> stillHome = new ArrayList<>(potentialHomeDefense);
+        List<DecisionRequest.Option> sparedToAttack = new ArrayList<>();
+        for (DecisionRequest.Option o : candidates) {
+            CardStateView card = byId.get(o.cardId);
+            if (hasKeyword(card.keywords, "Vigilance")) {
+                sparedToAttack.add(o); // doesn't cost any home defense at all
                 continue;
             }
+            if (posture == Posture.DESPERATE || !stillHome.contains(card)) {
+                // DESPERATE: holding back doesn't matter if the slow game
+                // is already lost. Not in stillHome: a non-creature-typed
+                // or already-filtered candidate never counted as home
+                // defense in the first place, so sending it costs nothing.
+                sparedToAttack.add(o);
+                continue;
+            }
+            List<CardStateView> withoutThisOne = new ArrayList<>(stillHome);
+            withoutThisOne.remove(card);
+            if (survivesCrackback(opponentFullBoard, withoutThisOne, me.life, posture)) {
+                stillHome.remove(card);
+                sparedToAttack.add(o);
+            }
+            // else: held back, this creature stays home to block.
+        }
+
+        List<DecisionRequest.Option> safe = new ArrayList<>();
+        List<DecisionRequest.Option> risky = new ArrayList<>();
+        for (DecisionRequest.Option o : sparedToAttack) {
+            CardStateView card = byId.get(o.cardId);
             (isSafeOrFavorable(card, blockers) ? safe : risky).add(o);
         }
 
@@ -115,6 +207,78 @@ public class GenericAttackStrategy implements AttackStrategy {
             }
         }
         return chosen;
+    }
+
+    /** Board value + life comparison against the specific defender being
+     * attacked - three buckets rather than forge-ai's 6-level aiAggression,
+     * capturing just "how much should I risk by attacking" without their
+     * many situational modifiers.
+     *
+     * Two attempts before this one got the calibration wrong, both
+     * verified live and caught before being trusted: a flat value
+     * difference ("boardAdvantage >= 5") was swamped by
+     * CombatKeywords' richer per-keyword scoring (a single well-
+     * keyworded creature can swing raw value by 10-25 on its own), so
+     * almost any early-game asymmetry tripped an extreme posture
+     * immediately - 36/37 sampled decisions landed in DEFENSIVE/
+     * DESPERATE, NORMAL (where the crackback check does its actual job)
+     * almost never reached. Switching to a ratio alone didn't fix it
+     * either - with the opponent's board still empty or nearly so
+     * (extremely common early on, since someone always plays a creature
+     * first), literally any single creature of mine produces a "ratio"
+     * so large it clears any reasonable threshold on its own.
+     *
+     * Fix: require board AND life to both clearly agree, not just
+     * whichever one is easiest to satisfy - and require some real board
+     * presence on both sides before the ratio means anything at all
+     * (a 1-creature vs 0-creature "ratio" isn't a real signal, it's just
+     * turn order). NORMAL is the default and should be the common case;
+     * the extremes are for genuinely lopsided positions, not any slight
+     * lead. */
+    private Posture readPosture(PlayerStateView me, PlayerStateView defender) {
+        double myBoardValue = 0;
+        if (me.battlefield != null) {
+            for (CardStateView c : me.battlefield) {
+                if (c.typeLine != null && c.typeLine.contains("Creature")) {
+                    myBoardValue += CreatureValue.of(c);
+                }
+            }
+        }
+        double theirBoardValue = 0;
+        if (defender.battlefield != null) {
+            for (CardStateView c : defender.battlefield) {
+                if (c.typeLine != null && c.typeLine.contains("Creature")) {
+                    theirBoardValue += CreatureValue.of(c);
+                }
+            }
+        }
+        int lifeAdvantage = me.life - defender.life;
+
+        // Need a real opposing board before "ahead on board" means
+        // anything - otherwise this is just turn-order noise, not a
+        // genuine advantage worth playing safe over.
+        boolean clearlyAheadOnBoard = theirBoardValue >= 3 && myBoardValue >= theirBoardValue * 1.8;
+        boolean clearlyBehindOnBoard = myBoardValue >= 3 && theirBoardValue >= myBoardValue * 1.8;
+
+        if (clearlyAheadOnBoard && lifeAdvantage >= 5) {
+            return Posture.DEFENSIVE;
+        }
+        if (clearlyBehindOnBoard && lifeAdvantage <= 0 || lifeAdvantage <= -15) {
+            return Posture.DESPERATE;
+        }
+        return Posture.NORMAL;
+    }
+
+    /** Mirrors isLethal() at the opponent: would their full creature
+     * board, attacking next turn against only homeDefenders as blockers,
+     * deal lethal-or-more damage to me. DEFENSIVE posture asks for a
+     * safety margin instead of an exact "not literally lethal" threshold,
+     * since there's no need to cut it close when already ahead. Caller
+     * already short-circuits DESPERATE before reaching here. */
+    private boolean survivesCrackback(List<CardStateView> opponentCreatures, List<CardStateView> homeDefenders,
+            int myLife, Posture posture) {
+        double margin = posture == Posture.DEFENSIVE ? Math.max(5, myLife * 0.25) : 0;
+        return !isLethal(opponentCreatures, homeDefenders, myLife - (int) margin);
     }
 
     /** Conservative: sums damage that's guaranteed through (evasive

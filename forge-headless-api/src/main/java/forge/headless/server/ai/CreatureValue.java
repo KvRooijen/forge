@@ -39,16 +39,20 @@ public final class CreatureValue {
         if (card.typeLine.contains("Creature")) {
             int power = card.power != null ? card.power : 0;
             int toughness = card.toughness != null ? card.toughness : 0;
-            double multiplier = CombatKeywords.impactMultiplier(card.keywords);
-            if (card.sick) {
-                multiplier *= 0.6;
-            }
             // Both stats matter, not just power - a 0/6 wall is a real
             // blocker/threat-soaker that can never attack profitably but
             // is genuinely hard to remove or race through, and a
             // high-toughness creature survives combat that a vanilla
-            // same-power one wouldn't.
-            double value = (power + toughness) * 0.5 * multiplier;
+            // same-power one wouldn't. Keyword value is additive on top
+            // (forge-ai's CreatureEvaluator approach), not a blanket
+            // multiplier - a vanilla 4/4 and a deathtouch/vigilance/
+            // hexproof 4/4 are very different cards, and collapsing that
+            // into one "evasive/scary" category multiplier was real lost
+            // signal, the same kind of gap as ETB/trigger valuation.
+            double value = (power + toughness) * 0.5 + CombatKeywords.keywordValue(power, toughness, card.keywords);
+            if (card.sick) {
+                value *= 0.6;
+            }
             if (card.isCommander) {
                 value += 3;
             }

@@ -373,7 +373,11 @@ public class GenericSpellSequencer implements SpellSequencer {
             // 0.75 toughness/0.25 power (need to survive, not attack).
             double defenseWeight = Math.min(0.75, Math.max(0.35, 0.5 + pressureRatio * 0.3));
             double powerWeight = 1.0 - defenseWeight;
-            value += (power * powerWeight + toughness * defenseWeight) * CombatKeywords.impactMultiplier(card.keywords);
+            // Keyword value is additive on top, not a multiplier on the
+            // weighted sum - see CombatKeywords.keywordValue's javadoc;
+            // same reasoning as CreatureValue's identical change.
+            value += power * powerWeight + toughness * defenseWeight;
+            value += CombatKeywords.keywordValue(power, toughness, card.keywords);
             // Flat per-body bonus, independent of stats: on a near-tie in
             // raw stats, two separate creatures beat one bigger one (more
             // blockers, survives a single removal spell, better combat
