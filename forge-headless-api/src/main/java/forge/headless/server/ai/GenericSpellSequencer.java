@@ -426,10 +426,18 @@ public class GenericSpellSequencer implements SpellSequencer {
             for (CardStateView c : opponentCreatures) {
                 bestTarget = Math.max(bestTarget, CreatureValue.of(c));
             }
-            // A small floor (not zero) keeps removal castable when it's the
-            // only legal play, but well below casting an actual threat -
-            // the point is to stop spending removal on an empty board.
-            return bestTarget > 0 ? bestTarget : 0.5;
+            // Genuinely zero, not a small positive floor: a positive value
+            // here would always win against the implicit "cast nothing"
+            // baseline whenever nothing else is competing for the mana -
+            // i.e. it would *guarantee* firing removal into an empty board
+            // exactly when there's no profitable target, the opposite of
+            // the intended effect. The knapsack's own tie-breaking already
+            // treats an exact-zero addition as "not worth including" (see
+            // solveKnapsack's reconstruction step - it only marks an item
+            // chosen on a strict value increase), so zero alone is enough
+            // to make a no-target removal spell correctly lose to passing,
+            // without needing any separate threshold/decline mechanism.
+            return bestTarget;
         }
         if ("SWEEPER".equals(role)) {
             double opp = 0;
