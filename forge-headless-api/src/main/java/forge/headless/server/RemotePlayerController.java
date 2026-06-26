@@ -242,14 +242,15 @@ public class RemotePlayerController extends PlayerController {
     }
 
     private DecisionResponse askList(String prompt, List<DecisionRequest.Option> options, int min, int max) {
-        return askList(prompt, options, min, max, null);
+        return askList(prompt, options, min, max, null, null);
     }
 
-    private DecisionResponse askList(String prompt, List<DecisionRequest.Option> options, int min, int max, String targetIntent) {
+    private DecisionResponse askList(String prompt, List<DecisionRequest.Option> options, int min, int max, String targetIntent, String listIntent) {
         DecisionRequest req = new DecisionRequest(UUID.randomUUID().toString(), "CHOOSE_LIST", prompt, options, safeBuildStateView(player));
         req.min = min;
         req.max = max;
         req.targetIntent = targetIntent;
+        req.listIntent = listIntent;
         return channel.ask(req);
     }
 
@@ -264,7 +265,7 @@ public class RemotePlayerController extends PlayerController {
      */
     <T> List<T> chooseFromList(String prompt, List<T> source, int min, int max,
             java.util.function.Function<T, String> labelFn, java.util.function.Function<T, String> cardIdFn) {
-        return chooseFromList(prompt, source, min, max, labelFn, cardIdFn, null);
+        return chooseFromList(prompt, source, min, max, labelFn, cardIdFn, null, null);
     }
 
     /** targetIntent is a coarse, high-confidence-only hint ("HARMFUL"/
@@ -276,6 +277,16 @@ public class RemotePlayerController extends PlayerController {
      * wrong to apply targeting logic there. */
     <T> List<T> chooseFromList(String prompt, List<T> source, int min, int max,
             java.util.function.Function<T, String> labelFn, java.util.function.Function<T, String> cardIdFn, String targetIntent) {
+        return chooseFromList(prompt, source, min, max, labelFn, cardIdFn, targetIntent, null);
+    }
+
+    /** listIntent is the discard/sacrifice/destroy-specific counterpart
+     * to targetIntent (see DecisionRequest.listIntent) - "WORST" when
+     * this player is choosing which of their own things to lose, null
+     * for every other use (unchanged default behavior). */
+    <T> List<T> chooseFromList(String prompt, List<T> source, int min, int max,
+            java.util.function.Function<T, String> labelFn, java.util.function.Function<T, String> cardIdFn,
+            String targetIntent, String listIntent) {
         if (source.isEmpty()) {
             return new ArrayList<>();
         }
@@ -294,7 +305,7 @@ public class RemotePlayerController extends PlayerController {
             options.add(new DecisionRequest.Option(String.valueOf(i), labelFn.apply(item),
                     cardIdFn != null ? cardIdFn.apply(item) : null, cardView));
         }
-        DecisionResponse resp = askList(prompt, options, Math.max(min, 0), Math.min(max, source.size()), targetIntent);
+        DecisionResponse resp = askList(prompt, options, Math.max(min, 0), Math.min(max, source.size()), targetIntent, listIntent);
         List<T> chosen = new ArrayList<>();
         if (resp.chosenIds != null) {
             for (String id : resp.chosenIds) {
@@ -825,13 +836,13 @@ public class RemotePlayerController extends PlayerController {
     @Override
     public CardCollectionView choosePermanentsToSacrifice(SpellAbility sa, int min, int max, CardCollectionView validTargets, String message) {
         return new CardCollection(chooseFromList(message != null ? message : "Choose permanents to sacrifice",
-                new ArrayList<>(validTargets), min, max, Card::toString, RemotePlayerController::cardIdOf));
+                new ArrayList<>(validTargets), min, max, Card::toString, RemotePlayerController::cardIdOf, null, "WORST"));
     }
 
     @Override
     public CardCollectionView choosePermanentsToDestroy(SpellAbility sa, int min, int max, CardCollectionView validTargets, String message) {
         return new CardCollection(chooseFromList(message != null ? message : "Choose permanents to destroy",
-                new ArrayList<>(validTargets), min, max, Card::toString, RemotePlayerController::cardIdOf));
+                new ArrayList<>(validTargets), min, max, Card::toString, RemotePlayerController::cardIdOf, null, "WORST"));
     }
 
     @Override
@@ -1348,7 +1359,7 @@ public class RemotePlayerController extends PlayerController {
     @Override
     public CardCollectionView chooseCardsToDiscardFrom(Player playerDiscard, SpellAbility sa, CardCollection validCards, int min, int max, CardCollectionView visibleToChooser) {
         return new CardCollection(chooseFromList("Choose cards to discard", new ArrayList<>(validCards),
-                min, max, Card::toString, RemotePlayerController::cardIdOf));
+                min, max, Card::toString, RemotePlayerController::cardIdOf, null, "WORST"));
     }
 
     @Override
@@ -1361,7 +1372,7 @@ public class RemotePlayerController extends PlayerController {
         String typeLabel = String.join(" or ", unlessTypes).toLowerCase();
         List<Card> chosen = new ArrayList<>(chooseFromList(
                 "Discard " + min + " cards, or just one " + typeLabel + " card instead",
-                new ArrayList<>(hand), 1, min, Card::toString, RemotePlayerController::cardIdOf));
+                new ArrayList<>(hand), 1, min, Card::toString, RemotePlayerController::cardIdOf, null, "WORST"));
         boolean hasQualifying = chosen.stream().anyMatch(c -> c.isValid(unlessTypes, sa.getActivatingPlayer(), sa.getHostCard(), sa));
         if (chosen.size() < min && !hasQualifying) {
             for (Card c : hand) {
@@ -1379,7 +1390,7 @@ public class RemotePlayerController extends PlayerController {
     @Override
     public CardCollection chooseCardsToDiscardToMaximumHandSize(int numDiscard) {
         return new CardCollection(chooseFromList("Discard down to maximum hand size",
-                new ArrayList<>(player.getCardsIn(ZoneType.Hand)), numDiscard, numDiscard, Card::toString, RemotePlayerController::cardIdOf));
+                new ArrayList<>(player.getCardsIn(ZoneType.Hand)), numDiscard, numDiscard, Card::toString, RemotePlayerController::cardIdOf, null, "WORST"));
     }
 
     @Override

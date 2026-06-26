@@ -28,6 +28,22 @@ public class DecisionRequest {
      * which need different logic (e.g. "worst card", not "most
      * threatening") and shouldn't be treated as a targeting decision. */
     public String targetIntent;
+    /** Only set for CHOOSE_LIST requests where the *direction* of "good
+     * choice" is known with confidence and isn't a targeting decision -
+     * currently only "WORST" (discard/sacrifice/destroy: this player is
+     * about to lose whichever items are chosen, so the least valuable
+     * ones should be picked). A deliberately separate field from
+     * targetIntent even though both only ever apply to CHOOSE_LIST - the
+     * two represent different decisions (who an effect should hit, vs.
+     * which of my own things I'd rather give up) and conflating them
+     * under one field would risk a discard prompt being misrouted into
+     * targeting logic expecting "HARMFUL"/"BENEFICIAL". Null for every
+     * other CHOOSE_LIST use (surveil, mode choice, dig/search-keep, ...),
+     * which fall back to the existing "take the minimum required"
+     * default - "keep the best" search semantics aren't classified here,
+     * a different, riskier direction this round deliberately didn't
+     * attempt. */
+    public String listIntent;
     /** Only meaningful for DECLARE_ATTACKERS: the name of whichever
      * player this combat is actually against, resolved from the
      * defender even when it's a planeswalker/battle rather than the

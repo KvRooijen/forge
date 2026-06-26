@@ -80,7 +80,7 @@ public class RuleBasedAiChannel implements RemoteChannel {
             case "CHOOSE_LIST":
                 response.chosenIds = request.targetIntent != null
                         ? brain.targetingStrategy.chooseTarget(options, request.targetIntent, request.min)
-                        : brain.listChoiceStrategy.chooseFromList(options, request.min);
+                        : brain.listChoiceStrategy.chooseFromList(options, request.min, request.listIntent);
                 break;
             default:
                 if (!options.isEmpty()) {

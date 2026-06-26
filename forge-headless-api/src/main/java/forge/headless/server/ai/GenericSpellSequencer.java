@@ -97,6 +97,20 @@ public class GenericSpellSequencer implements SpellSequencer {
                 }
             }
         }
+        // How much board pressure I'm actually under right now (total
+        // opponent power relative to my life) - feeds creature value's
+        // power/toughness weighting: under real pressure a blocker's
+        // toughness is worth more than its power (I need to survive),
+        // with little pressure power matters more (I'm free to race).
+        double incomingPower = 0;
+        for (CardStateView c : opponentCreatures) {
+            int p = c.power != null ? c.power : 0;
+            if (p > 0) {
+                incomingPower += p;
+            }
+        }
+        double myLife = you != null ? you.life : 40;
+        double pressureRatio = incomingPower / Math.max(1.0, myLife);
 
         // Commander still gets a hard priority override - casting it as
         // soon as affordable outranks any value/efficiency comparison.
@@ -118,7 +132,7 @@ public class GenericSpellSequencer implements SpellSequencer {
         }
 
         return planBestSubset(nonLandOptions, castableIds, excludedCardIds, manaSources, availableMana, totalManaSources,
-                opponentCreatures, myCreatures);
+                opponentCreatures, myCreatures, pressureRatio);
     }
 
     private List<CardStateView> creaturesOf(PlayerStateView p) {
@@ -136,7 +150,7 @@ public class GenericSpellSequencer implements SpellSequencer {
 
     private DecisionRequest.Option planBestSubset(List<DecisionRequest.Option> nonLandOptions, Map<String, CardStateView> castableIds,
             Set<String> excludedCardIds, List<CardStateView> manaSources, int availableMana, int totalManaSources,
-            List<CardStateView> opponentCreatures, List<CardStateView> myCreatures) {
+            List<CardStateView> opponentCreatures, List<CardStateView> myCreatures, double pressureRatio) {
         List<DecisionRequest.Option> candidates = new ArrayList<>();
         List<Integer> costs = new ArrayList<>();
         List<Double> values = new ArrayList<>();
@@ -152,7 +166,7 @@ public class GenericSpellSequencer implements SpellSequencer {
             }
             candidates.add(o);
             costs.add(cmc);
-            values.add(valueOf(o, card, totalManaSources, opponentCreatures, myCreatures));
+            values.add(valueOf(o, card, totalManaSources, opponentCreatures, myCreatures, pressureRatio));
         }
         if (candidates.isEmpty()) {
             return null;
@@ -312,8 +326,13 @@ public class GenericSpellSequencer implements SpellSequencer {
      *
      * - ramp (a mana producer, or a RAMP-classified spell): worth most
      *   while mana is the bottleneck, tapering to ~0 once there's plenty
-     * - creature: still (power+toughness)*0.5*keywords for now (board-
-     *   state-relative creature value is a separate planned step)
+     * - creature: power+toughness, but the *split* between them shifts
+     *   with board pressure (see pressureRatio) - under real pressure a
+     *   blocker's toughness matters more than its power (I need to
+     *   survive), with little pressure power matters more (free to
+     *   race) - plus a flat per-body bonus so two on-curve creatures
+     *   beat one bigger one on a stat tie (more blockers, resilient to a
+     *   single removal spell, better combat math than one big body)
      * - REMOVAL: worth as much as the best thing it can kill right now -
      *   and almost nothing cast into a board with nothing worth killing,
      *   so the AI stops blowing removal on an empty board
@@ -324,7 +343,7 @@ public class GenericSpellSequencer implements SpellSequencer {
      * - anything still unclassified: the CMC proxy, unchanged
      */
     private double valueOf(DecisionRequest.Option o, CardStateView card, int totalManaSources,
-            List<CardStateView> opponentCreatures, List<CardStateView> myCreatures) {
+            List<CardStateView> opponentCreatures, List<CardStateView> myCreatures, double pressureRatio) {
         double value = 0;
         String role = o.spellRole;
 
@@ -336,7 +355,18 @@ public class GenericSpellSequencer implements SpellSequencer {
         if (card.typeLine != null && card.typeLine.contains("Creature")) {
             int power = card.power != null ? card.power : 0;
             int toughness = card.toughness != null ? card.toughness : 0;
-            value += (power + toughness) * 0.5 * CombatKeywords.impactMultiplier(card.keywords);
+            // Weights still sum to 1 (same overall scale as the old flat
+            // 0.5/0.5 split), just no longer fixed: 0 pressure -> 0.35
+            // toughness/0.65 power (free to race), heavy pressure caps at
+            // 0.75 toughness/0.25 power (need to survive, not attack).
+            double defenseWeight = Math.min(0.75, Math.max(0.35, 0.5 + pressureRatio * 0.3));
+            double powerWeight = 1.0 - defenseWeight;
+            value += (power * powerWeight + toughness * defenseWeight) * CombatKeywords.impactMultiplier(card.keywords);
+            // Flat per-body bonus, independent of stats: on a near-tie in
+            // raw stats, two separate creatures beat one bigger one (more
+            // blockers, survives a single removal spell, better combat
+            // math than one all-in body).
+            value += 1.0;
             return value; // creature body (+ ramp bonus for mana dorks) is the whole story
         }
 
