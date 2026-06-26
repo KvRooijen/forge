@@ -74,6 +74,28 @@ public class CardStateView {
      * pattern in modern Magic/Commander) score identically by stats
      * alone - see GenericSpellSequencer.valueOf. */
     public String etbRole;
+    /** Same idea as etbRole, for this card's own "when this dies" trigger
+     * - unlike an ETB (a one-time event already consumed once a creature
+     * is sitting resolved on the battlefield), this is real ongoing value
+     * *while the creature is alive*: it makes the creature strictly
+     * better than a vanilla one of the same stats, win or lose the
+     * eventual race to remove it - so unlike etbRole, this (discounted
+     * for being conditional on actually dying) belongs in CreatureValue's
+     * already-on-board scoring, not just the cast decision. */
+    public String deathRole;
+    /** Same idea again, for "whenever this attacks" - more reliably
+     * realized than a death trigger (the controller chooses when to
+     * attack) but still conditional, not guaranteed every turn. */
+    public String attackRole;
+    /** Precomputed team-buff value from this card's own static "lords
+     * get bonus" abilities (e.g. "Other Elves you control get +1/+1") -
+     * computed eagerly server-side via real Card.isValid() restriction
+     * matching against the controller's actual creatures (see
+     * RemotePlayerController.classifyAnthemValue), since a flattened
+     * CardStateView can't be matched against a restriction string itself.
+     * 0 when there's no static team buff, or it's not a plain-integer
+     * magnitude classified with confidence. */
+    public double anthemValue;
 
     public static class RoomDoor {
         public String name;
@@ -95,7 +117,7 @@ public class CardStateView {
             String attackingTarget, String blockingAttacker, boolean producesMana,
             RoomDoor leftDoor, RoomDoor rightDoor, List<String> keywords,
             String attachedToId, Integer commanderTax, List<String> producedColors, boolean entersTapped,
-            boolean controllerIsYou, String etbRole) {
+            boolean controllerIsYou, String etbRole, String deathRole, String attackRole, double anthemValue) {
         this.id = id;
         this.name = name;
         this.manaCost = manaCost;
@@ -119,5 +141,8 @@ public class CardStateView {
         this.entersTapped = entersTapped;
         this.controllerIsYou = controllerIsYou;
         this.etbRole = etbRole;
+        this.deathRole = deathRole;
+        this.attackRole = attackRole;
+        this.anthemValue = anthemValue;
     }
 }

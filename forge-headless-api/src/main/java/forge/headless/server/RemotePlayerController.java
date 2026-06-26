@@ -600,7 +600,10 @@ public class RemotePlayerController extends PlayerController {
                 keywords,
                 attachedTo != null ? String.valueOf(attachedTo.getId()) : null,
                 commanderTax, producedColors, entersTapped, c.getController() != null && c.getController().equals(player),
-                c.isCreature() ? classifyEtbRole(c) : null);
+                c.isCreature() ? classifyEtbRole(c) : null,
+                c.isCreature() ? classifyDeathRole(c) : null,
+                c.isCreature() ? classifyAttackRole(c) : null,
+                classifyAnthemValue(c));
     }
 
     /** CardStateName.LeftSplit/RightSplit are the two fixed door slots a
@@ -1063,6 +1066,128 @@ public class RemotePlayerController extends PlayerController {
             }
         }
         return null;
+    }
+
+    /** Same idea as classifyEtbRole, swapped to the "this dies" pattern
+     * (Mode$ ChangesZone, Origin$ Battlefield, Destination$ Graveyard,
+     * ValidCard$ ...Self...) - the textbook "when CARDNAME dies" trigger
+     * shape, same Trigger type as ETB, just the zone-change direction
+     * reversed. Unlike an ETB (a one-time event already consumed once a
+     * creature is sitting resolved on the battlefield), a death trigger's
+     * value is real and ongoing while the creature is *alive* - it makes
+     * the creature strictly better than a vanilla one of the same stats
+     * regardless of whether it ever actually dies, so (discounted for
+     * being conditional on that happening) it belongs in CreatureValue's
+     * already-on-board scoring too, not just the cast decision. */
+    private static String classifyDeathRole(Card host) {
+        if (host == null) {
+            return null;
+        }
+        for (forge.game.trigger.Trigger trig : host.getTriggers()) {
+            if (trig.getMode() != forge.game.trigger.TriggerType.ChangesZone) {
+                continue;
+            }
+            if (!"Battlefield".equals(trig.getParamOrDefault("Origin", ""))
+                    || !"Graveyard".equals(trig.getParamOrDefault("Destination", ""))) {
+                continue;
+            }
+            if (!trig.getParamOrDefault("ValidCard", "").contains("Self")) {
+                continue;
+            }
+            SpellAbility deathSa = trig.ensureAbility();
+            String role = classifyApiRole(deathSa != null ? deathSa.getApi() : null, false);
+            if (role != null) {
+                return role;
+            }
+        }
+        return null;
+    }
+
+    /** Same idea again, for "whenever this attacks" (Mode$ Attacks,
+     * ValidCard$ ...Self...) - a different Trigger type than ETB/death
+     * but the exact same shape otherwise (ensureAbility -> ApiType ->
+     * classifyApiRole). More reliably realized than a death trigger (the
+     * controller chooses when to attack, rather than depending on the
+     * opponent's removal), but still conditional, not guaranteed every
+     * turn - discounted accordingly wherever it's added. */
+    private static String classifyAttackRole(Card host) {
+        if (host == null) {
+            return null;
+        }
+        for (forge.game.trigger.Trigger trig : host.getTriggers()) {
+            if (trig.getMode() != forge.game.trigger.TriggerType.Attacks) {
+                continue;
+            }
+            if (!trig.getParamOrDefault("ValidCard", "").contains("Self")) {
+                continue;
+            }
+            SpellAbility attackSa = trig.ensureAbility();
+            String role = classifyApiRole(attackSa != null ? attackSa.getApi() : null, false);
+            if (role != null) {
+                return role;
+            }
+        }
+        return null;
+    }
+
+    /** Static team-buff value (lords/anthems: "Other Elves you control get
+     * +1/+1", "Creatures you control get +1/+1", ...) - a completely
+     * different shape from triggers (a StaticAbility, always active, no
+     * SpellAbility/ApiType involved), but arguably the single most common
+     * source of a creature being worth far more than its own stats in
+     * Commander. Computed eagerly here (not deferred to a role string
+     * reinterpreted later) because answering "how many of my creatures
+     * does this actually affect" requires Card.isValid() restriction
+     * matching against *real* Card objects - GenericSpellSequencer/
+     * CreatureValue only ever see flattened CardStateView DTOs, which
+     * can't be matched against a restriction string at all.
+     *
+     * Deliberately conservative: only Mode$ Continuous statics with a
+     * *plain integer* AddPower$/AddToughness$ are scored - an SVar-driven
+     * magnitude (AddPower$ X) is skipped entirely rather than guessed at,
+     * since a wrong magnitude is worse than no signal. Affected$ is
+     * matched via the engine's own Card.isValid() (the same restriction-
+     * matching machinery the game itself uses for these effects), against
+     * the host's controller's *current* creatures - not a re-implemented
+     * guess at what the restriction string means. */
+    private static double classifyAnthemValue(Card host) {
+        if (host == null || host.getController() == null) {
+            return 0;
+        }
+        double total = 0;
+        for (forge.game.staticability.StaticAbility st : host.getStaticAbilities()) {
+            if (!"Continuous".equals(st.getParamOrDefault("Mode", ""))) {
+                continue;
+            }
+            Integer addPower = parsePlainInt(st.getParam("AddPower"));
+            Integer addToughness = parsePlainInt(st.getParam("AddToughness"));
+            if (addPower == null && addToughness == null) {
+                continue;
+            }
+            String affected = st.getParam("Affected");
+            if (affected == null) {
+                continue;
+            }
+            int matched = 0;
+            for (Card c : host.getController().getCreaturesInPlay()) {
+                if (c.isValid(affected.split(","), host.getController(), host, st)) {
+                    matched++;
+                }
+            }
+            total += ((addPower != null ? addPower : 0) + (addToughness != null ? addToughness : 0)) * 0.5 * matched;
+        }
+        return total;
+    }
+
+    private static Integer parsePlainInt(String s) {
+        if (s == null) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(s.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     @Override

@@ -380,7 +380,17 @@ public class GenericSpellSequencer implements SpellSequencer {
             // math than one all-in body).
             value += 1.0;
             value += roleValue(card.etbRole, opponentCreatures, myCreatures);
-            return value; // creature body (+ ETB + ramp bonus for mana dorks) is the whole story
+            // Death/attack triggers are conditional (not guaranteed the
+            // way an ETB is - they depend on the creature actually dying
+            // or being attacked with), so their board-aware value is
+            // discounted before adding, same reasoning as
+            // CreatureValue's flatter version of this same idea.
+            value += roleValue(card.deathRole, opponentCreatures, myCreatures) * 0.4;
+            value += roleValue(card.attackRole, opponentCreatures, myCreatures) * 0.6;
+            // Static team-buff value (lords/anthems) is continuously
+            // active while alive - full value, no discount, same as ETB.
+            value += card.anthemValue;
+            return value; // creature body + every real effect it has is the whole story
         }
 
         if (!isRamp) {
@@ -392,6 +402,10 @@ public class GenericSpellSequencer implements SpellSequencer {
                 // proxy rather than treating it as worthless, same as before.
                 value += ManaUtils.manaValue(card.manaCost);
             }
+            // A noncreature anthem (Glorious Anthem) is real, additive
+            // team-buff value on top of whatever else this spell does -
+            // same reasoning as the creature branch above.
+            value += card.anthemValue;
         }
         return value;
     }
