@@ -22,6 +22,13 @@ import java.util.Set;
  * knapsack (maximize total value, budget = mana available) finds the
  * actual best combination instead.
  *
+ * The "value" the knapsack maximizes is board-aware (see valueOf), NOT a
+ * mana-cost proxy - that distinction is the whole point. Scoring every
+ * spell by ~CMC (the prior version, and what the simple baseline does
+ * via "cast highest CMC") makes the knapsack converge on the same plays
+ * as the baseline however cleverly it packs them. valueOf instead scores
+ * removal by what it kills, a sweeper by how far behind I am, etc.
+ *
  * Re-solved from scratch on every call rather than planned once and
  * remembered: after casting one of the chosen items, the available mana
  * drops by exactly its cost and it drops out of the candidate list, which
@@ -78,6 +85,19 @@ public class GenericSpellSequencer implements SpellSequencer {
         int totalManaSources = manaSources.size();
         int availableMana = (int) manaSources.stream().filter(c -> !c.tapped).count();
 
+        // Board context so non-creature spells can be valued by what they
+        // actually accomplish right now (removal by its best target, a
+        // sweeper by how far behind I am) instead of by mana cost.
+        List<CardStateView> myCreatures = creaturesOf(you);
+        List<CardStateView> opponentCreatures = new ArrayList<>();
+        if (state != null && state.players != null) {
+            for (PlayerStateView p : state.players) {
+                if (p != null && !p.isYou) {
+                    opponentCreatures.addAll(creaturesOf(p));
+                }
+            }
+        }
+
         // Commander still gets a hard priority override - casting it as
         // soon as affordable outranks any value/efficiency comparison.
         for (DecisionRequest.Option o : nonLandOptions) {
@@ -97,11 +117,26 @@ public class GenericSpellSequencer implements SpellSequencer {
             }
         }
 
-        return planBestSubset(nonLandOptions, castableIds, excludedCardIds, manaSources, availableMana, totalManaSources);
+        return planBestSubset(nonLandOptions, castableIds, excludedCardIds, manaSources, availableMana, totalManaSources,
+                opponentCreatures, myCreatures);
+    }
+
+    private List<CardStateView> creaturesOf(PlayerStateView p) {
+        List<CardStateView> out = new ArrayList<>();
+        if (p == null || p.battlefield == null) {
+            return out;
+        }
+        for (CardStateView c : p.battlefield) {
+            if (c.typeLine != null && c.typeLine.contains("Creature")) {
+                out.add(c);
+            }
+        }
+        return out;
     }
 
     private DecisionRequest.Option planBestSubset(List<DecisionRequest.Option> nonLandOptions, Map<String, CardStateView> castableIds,
-            Set<String> excludedCardIds, List<CardStateView> manaSources, int availableMana, int totalManaSources) {
+            Set<String> excludedCardIds, List<CardStateView> manaSources, int availableMana, int totalManaSources,
+            List<CardStateView> opponentCreatures, List<CardStateView> myCreatures) {
         List<DecisionRequest.Option> candidates = new ArrayList<>();
         List<Integer> costs = new ArrayList<>();
         List<Double> values = new ArrayList<>();
@@ -117,7 +152,7 @@ public class GenericSpellSequencer implements SpellSequencer {
             }
             candidates.add(o);
             costs.add(cmc);
-            values.add(valueOf(card, totalManaSources));
+            values.add(valueOf(o, card, totalManaSources, opponentCreatures, myCreatures));
         }
         if (candidates.isEmpty()) {
             return null;
@@ -266,24 +301,77 @@ public class GenericSpellSequencer implements SpellSequencer {
         return false;
     }
 
-    private double valueOf(CardStateView card, int totalManaSources) {
+    /**
+     * What a single castable spell is worth *right now*, given the board -
+     * the heart of "what's actually good to play". The previous version
+     * scored creatures as (power+toughness)*0.5 and every non-creature as
+     * its CMC, which made the whole knapsack a proxy for "spend the most
+     * mana on the biggest thing" - i.e. the same behaviour as the simple
+     * baseline's "cast highest CMC". This values a spell by what it
+     * accomplishes against the current board instead:
+     *
+     * - ramp (a mana producer, or a RAMP-classified spell): worth most
+     *   while mana is the bottleneck, tapering to ~0 once there's plenty
+     * - creature: still (power+toughness)*0.5*keywords for now (board-
+     *   state-relative creature value is a separate planned step)
+     * - REMOVAL: worth as much as the best thing it can kill right now -
+     *   and almost nothing cast into a board with nothing worth killing,
+     *   so the AI stops blowing removal on an empty board
+     * - SWEEPER: (opponent board value - my board value), so it's a
+     *   strong play when behind on board and a *negative*-value one (never
+     *   chosen) when ahead
+     * - DRAW: a steady board-independent refuel
+     * - anything still unclassified: the CMC proxy, unchanged
+     */
+    private double valueOf(DecisionRequest.Option o, CardStateView card, int totalManaSources,
+            List<CardStateView> opponentCreatures, List<CardStateView> myCreatures) {
         double value = 0;
-        if (card.producesMana) {
-            // Ramp is worth the most when mana is actually the
-            // bottleneck (early), tapering to ~0 once there's already
-            // plenty of it - a 7th mana source doesn't accelerate
-            // anything that isn't already accelerated.
+        String role = o.spellRole;
+
+        boolean isRamp = card.producesMana || "RAMP".equals(role);
+        if (isRamp) {
             value += Math.max(0, 6 - totalManaSources) * 2.0;
         }
+
         if (card.typeLine != null && card.typeLine.contains("Creature")) {
             int power = card.power != null ? card.power : 0;
             int toughness = card.toughness != null ? card.toughness : 0;
             value += (power + toughness) * 0.5 * CombatKeywords.impactMultiplier(card.keywords);
-        } else if (!card.producesMana) {
-            // Artifact/enchantment/sorcery/instant with no mana ability
-            // and no stats to read - no real signal available without
-            // oracle text, so this falls back to CMC as a rough proxy
-            // rather than treating it as worthless.
+            return value; // creature body (+ ramp bonus for mana dorks) is the whole story
+        }
+
+        if ("REMOVAL".equals(role)) {
+            double bestTarget = 0;
+            for (CardStateView c : opponentCreatures) {
+                bestTarget = Math.max(bestTarget, CreatureValue.of(c));
+            }
+            // A small floor (not zero) keeps removal castable when it's the
+            // only legal play, but well below casting an actual threat -
+            // the point is to stop spending removal on an empty board.
+            value += bestTarget > 0 ? bestTarget : 0.5;
+        } else if ("SWEEPER".equals(role)) {
+            double opp = 0;
+            for (CardStateView c : opponentCreatures) {
+                opp += CreatureValue.of(c);
+            }
+            double mine = 0;
+            for (CardStateView c : myCreatures) {
+                mine += CreatureValue.of(c);
+            }
+            // Negative when I'd lose more than the opponent - the knapsack
+            // then simply never includes it (not-casting always scores
+            // higher), which is exactly "don't wipe when you're ahead".
+            value += opp - mine;
+        } else if ("DRAW".equals(role)) {
+            // Roughly a mid-curve play's worth - competes with creatures
+            // without dominating them, so the AI refuels when there's
+            // nothing more impactful to do but doesn't draw instead of
+            // developing a threatening board.
+            value += 3.0;
+        } else if (!isRamp) {
+            // Planeswalker / enchantment engine / pump / unclassified - no
+            // reliable effect signal, fall back to CMC as a rough proxy
+            // rather than treating it as worthless, same as before.
             value += ManaUtils.manaValue(card.manaCost);
         }
         return value;

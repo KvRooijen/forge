@@ -63,6 +63,16 @@ public class DecisionRequest {
          * library), since the player legitimately sees them at decision
          * time even though we don't otherwise serialize that zone. */
         public CardStateView card;
+        /** Only set on CHOOSE_SPELL_ABILITY options: a coarse,
+         * high-confidence classification of what casting this spell does
+         * ("REMOVAL"/"SWEEPER"/"DRAW"/"RAMP"/"CREATURE"), derived from the
+         * SpellAbility's engine ApiType (see
+         * RemotePlayerController.classifySpellRole). Lets the AI value a
+         * spell by what it accomplishes against the current board rather
+         * than treating every non-creature as worth its mana cost. Null
+         * whenever the effect's value can't be classified with confidence
+         * - the AI falls back to a CMC proxy for those, same as before. */
+        public String spellRole;
 
         public Option() { }
 

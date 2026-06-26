@@ -939,6 +939,52 @@ public class RemotePlayerController extends PlayerController {
         return null;
     }
 
+    private static final java.util.Set<forge.game.ability.ApiType> SWEEPER_APIS = java.util.Set.of(
+            forge.game.ability.ApiType.DestroyAll, forge.game.ability.ApiType.DamageAll,
+            forge.game.ability.ApiType.SacrificeAll);
+    private static final java.util.Set<forge.game.ability.ApiType> SINGLE_REMOVAL_APIS = java.util.Set.of(
+            forge.game.ability.ApiType.Destroy, forge.game.ability.ApiType.DealDamage,
+            forge.game.ability.ApiType.Sacrifice, forge.game.ability.ApiType.GainControl,
+            forge.game.ability.ApiType.GainControlVariant);
+
+    /** Coarse, high-confidence-only "what does casting this spell do"
+     * classification, so the AI can value a spell by its effect on the
+     * current board rather than by mana cost alone (see
+     * GenericSpellSequencer.valueOf). Only the cases where a wrong guess
+     * would be cheap to make and clearly useful to have are classified;
+     * everything ambiguous returns null and the AI falls back to its CMC
+     * proxy. Order matters: a creature spell that also has an ETB removal
+     * effect should still read as CREATURE (its body is the durable
+     * value), so the permanent-type check comes first. */
+    private static String classifySpellRole(SpellAbility sa) {
+        if (sa == null || !sa.isSpell()) {
+            // Activated/mana abilities of permanents already in play aren't
+            // "spells to sequence" - the sequencer ignores these anyway.
+            return null;
+        }
+        Card host = sa.getHostCard();
+        if (host != null && host.isCreature()) {
+            return "CREATURE";
+        }
+        forge.game.ability.ApiType api = sa.getApi();
+        if (api == null) {
+            return null;
+        }
+        if (api == forge.game.ability.ApiType.Mana) {
+            return "RAMP";
+        }
+        if (SWEEPER_APIS.contains(api)) {
+            return "SWEEPER";
+        }
+        if (SINGLE_REMOVAL_APIS.contains(api)) {
+            return "REMOVAL";
+        }
+        if (api == forge.game.ability.ApiType.Draw || api == forge.game.ability.ApiType.Dig) {
+            return "DRAW";
+        }
+        return null;
+    }
+
     @Override
     public boolean chooseTargetsFor(SpellAbility currentAbility) {
         // Real target selection (e.g. "create a token that's a copy of
@@ -1543,7 +1589,9 @@ public class RemotePlayerController extends PlayerController {
             SpellAbility sa = legalPlays.get(i);
             Card host = sa.getHostCard();
             String cardId = host != null ? String.valueOf(host.getId()) : null;
-            options.add(new DecisionRequest.Option(String.valueOf(i), sa.toString(), cardId, host != null ? toCardView(host) : null));
+            DecisionRequest.Option option = new DecisionRequest.Option(String.valueOf(i), sa.toString(), cardId, host != null ? toCardView(host) : null);
+            option.spellRole = classifySpellRole(sa);
+            options.add(option);
         }
         options.add(new DecisionRequest.Option(END_TURN_OPTION, "End Turn", null));
         DecisionResponse resp = ask("CHOOSE_SPELL_ABILITY", "Choose a play, or none to pass priority", options);
