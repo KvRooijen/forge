@@ -39,7 +39,24 @@ public final class ForgeBootstrap {
         File editionsDir = new File(resDir, "editions");
         File blockDataDir = new File(resDir, "blockdata");
         File setLookupDir = new File(resDir, "setlookup");
-        CardStorageReader reader = new CardStorageReader(cardsDir.getAbsolutePath(), null, false);
+        // Lazy card loading - was false (eager: parses all ~33k card
+        // scripts into memory on every single process startup, even
+        // though one Commander pod only ever touches a few hundred of
+        // them). StaticData.getCard() already has a working by-name
+        // fallback (calls attemptToLoadCard() on a miss, loading just
+        // that one card's file), so lazy loading still works correctly -
+        // verified live before trusting it.
+        //
+        // The TOKEN reader deliberately stays eager (false): unlike
+        // getCard(), TokenDb has no equivalent by-name fallback - it's
+        // built ONCE from whatever the token reader returned at
+        // construction time and never reconsulted, so a lazy/empty
+        // initial load would permanently break every token-creating
+        // effect (Sol Ring's elemental tokens, etc.) for the rest of the
+        // game, not just slow them down. Tokens are also a much smaller
+        // dataset than the full card pool, so eager-loading them isn't
+        // the cost this change is targeting anyway.
+        CardStorageReader reader = new CardStorageReader(cardsDir.getAbsolutePath(), null, true);
         // The simpler 8-arg StaticData constructor (no tokenReader) was
         // silently leaving StaticData.getAllTokens() null - every token-
         // creating effect (Sower of Discord, Sol Ring's... no, but plenty

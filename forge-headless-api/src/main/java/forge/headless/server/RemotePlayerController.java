@@ -2189,6 +2189,13 @@ public class RemotePlayerController extends PlayerController {
         // back to a random valid name instead - the same fallback the
         // engine itself already uses one branch over for its "random"
         // mode - means this is merely not-smart instead of fatal.
+        //
+        // Under lazy card loading (ForgeBootstrap), streamAllFaces() only
+        // sees cards already loaded by name (i.e. cards actually in
+        // someone's deck this game), not the full ~33k pool - a further,
+        // narrower version of "not smart": .orElse("") already handles
+        // finding nothing gracefully (same as before), so this can't
+        // crash, it can just pick from a smaller pool than it used to.
         return forge.StaticData.instance().getCommonCards().streamAllFaces()
                 .filter(cpp).collect(forge.util.StreamUtil.random())
                 .map(ICardFace::getName).orElse("");
