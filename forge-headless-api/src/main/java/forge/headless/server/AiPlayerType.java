@@ -44,7 +44,7 @@ public enum AiPlayerType {
     RULE_BASED_V2 {
         @Override
         public LobbyPlayer createLobbyPlayer(String seatName) {
-            return new LobbyPlayerRemote(seatName, new RuleBasedAiChannel(), null);
+            return new LobbyPlayerRemote(seatName, new RuleBasedAiChannel(forge.headless.server.ai.HeuristicAiBrain.generic(), seatName), null);
         }
     };
 

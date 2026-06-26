@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 
 /**
  * Successor to InProcessAiChannel - same RemoteChannel/protocol shape, but
@@ -27,6 +28,12 @@ import java.util.Set;
  */
 public class RuleBasedAiChannel implements RemoteChannel {
     private final HeuristicAiBrain brain;
+    private final String seatName;
+    // One per channel instance, which is one per seat per game (see
+    // AiPlayerType.RULE_BASED_V2 / BatchRunner.playGame) - scopes
+    // DecisionLogger records to "this seat, this game" without needing a
+    // game-wide id threaded down from BatchRunner.
+    private final String seatChannelId = UUID.randomUUID().toString();
 
     private final Set<String> recentlyFailedCardIds = new HashSet<>();
     private String lastAttemptedCardId;
@@ -35,11 +42,16 @@ public class RuleBasedAiChannel implements RemoteChannel {
     private int lastPayManaCount;
 
     public RuleBasedAiChannel() {
-        this(HeuristicAiBrain.generic());
+        this(HeuristicAiBrain.generic(), null);
     }
 
     public RuleBasedAiChannel(HeuristicAiBrain brain) {
+        this(brain, null);
+    }
+
+    public RuleBasedAiChannel(HeuristicAiBrain brain, String seatName) {
         this.brain = brain;
+        this.seatName = seatName;
     }
 
     @Override
@@ -89,6 +101,9 @@ public class RuleBasedAiChannel implements RemoteChannel {
                 } else {
                     response.booleanValue = true;
                 }
+        }
+        if (DecisionLogger.isEnabled()) {
+            DecisionLogger.log(seatChannelId, seatName, request, response);
         }
         return response;
     }
