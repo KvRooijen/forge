@@ -323,7 +323,15 @@ public class GenericAttackStrategy implements AttackStrategy {
      * blocker that kills this attacker without dying itself. Everything
      * else (no blockers, a trade, a block that doesn't kill mine, mutual
      * destruction) is fine to attack into - "favorable or neutral", not
-     * just strictly-winning trades. */
+     * just strictly-winning trades.
+     *
+     * First/double strike (CombatMath, shared with GenericBlockStrategy's
+     * identical concern on the blocking side - forge-ai audit Tier 2 #4)
+     * is checked before falling back to simultaneous-damage math: a
+     * blocker my attacker kills before it can ever swing back is no
+     * threat at all regardless of its raw power, and a blocker that kills
+     * my attacker first is guaranteed to survive regardless of its raw
+     * toughness - both are cases simultaneous math gets wrong. */
     private boolean isSafeOrFavorable(CardStateView attacker, List<CardStateView> blockers) {
         if (isGuaranteedUnblocked(attacker, blockers) || blockers.isEmpty()) {
             return true;
@@ -334,7 +342,15 @@ public class GenericAttackStrategy implements AttackStrategy {
         for (CardStateView b : blockers) {
             int bPower = b.power != null ? b.power : 0;
             int bToughness = b.toughness != null ? b.toughness : 0;
-            boolean blockerKillsMine = bPower >= myToughness || (hasKeyword(b.keywords, "Deathtouch") && bPower > 0);
+            boolean bDeathtouch = hasKeyword(b.keywords, "Deathtouch");
+
+            if (CombatMath.diesWithoutStriking(myPower, iHaveDeathtouch, attacker.keywords, bToughness, b.keywords)) {
+                continue; // I kill this blocker before it can ever hit back - not a threat
+            }
+            if (CombatMath.diesWithoutStriking(bPower, bDeathtouch, b.keywords, myToughness, attacker.keywords)) {
+                return false; // this blocker kills me before I can hit back - guaranteed unsafe
+            }
+            boolean blockerKillsMine = bPower >= myToughness || (bDeathtouch && bPower > 0);
             // Deathtouch on MY side means any damage I deal is lethal, so
             // the blocker never "survives" blocking me regardless of
             // toughness - at worst this is a trade, never a clean loss.

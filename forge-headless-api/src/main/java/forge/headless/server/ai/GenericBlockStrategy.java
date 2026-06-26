@@ -35,11 +35,16 @@ import java.util.Set;
  *    after passes 1-2 would deal lethal-or-more damage, sacrifice the
  *    cheapest available creature against the biggest remaining
  *    attackers (most damage prevented per creature lost) until the
- *    remaining damage drops below my life total.
+ *    remaining damage drops below my life total. Accounts for trample
+ *    carryover (absorbedByChump) - a chump only stops as much damage as
+ *    it takes to kill it, not the attacker's full power.
  *
- * Deliberately not modeled: first strike/double strike combat-step
- * ordering, and trample's excess-damage carryover - real
- * simplifications, not oversights.
+ * First/double strike combat-step ordering is modeled in pass 1
+ * (bestFreeOrTradeBlocker, via CombatMath - shared with
+ * GenericAttackStrategy's identical concern on the attacking side).
+ * Gang-blocking (pass 2) does not yet account for either first strike or
+ * trample carryover against a multi-blocker gang - a real, narrower
+ * remaining simplification, not folded in here to avoid overclaiming.
  */
 public class GenericBlockStrategy implements BlockStrategy {
     @Override
@@ -86,7 +91,7 @@ public class GenericBlockStrategy implements BlockStrategy {
                 if (chump != null) {
                     result.put(g.id, List.of(chump.id));
                     used.add(chump.id);
-                    incoming -= power(g.attacker);
+                    incoming -= absorbedByChump(g.attacker, chump.card);
                 }
             }
         }
@@ -114,8 +119,31 @@ public class GenericBlockStrategy implements BlockStrategy {
             }
             CardStateView b = o.card;
             double blockerValue = CreatureValue.of(b);
-            boolean blockerKillsAttacker = power(b) >= attackerToughness || (hasKeyword(b.keywords, "Deathtouch") && power(b) > 0);
-            boolean blockerSurvives = !attackerHasDeathtouch && toughness(b) > attackerPower;
+            int bPower = power(b);
+            int bToughness = toughness(b);
+            boolean blockerHasDeathtouch = hasKeyword(b.keywords, "Deathtouch");
+
+            // First/double strike decides who actually gets to deal
+            // damage, not just who's "faster" cosmetically - a creature
+            // that dies in an earlier combat step never lands its own hit,
+            // regardless of its power. Two asymmetric cases simultaneous
+            // math gets wrong fall out of this (forge-ai audit Tier 2 #4):
+            if (CombatMath.diesWithoutStriking(attackerPower, attackerHasDeathtouch, attacker.keywords, bToughness, b.keywords)) {
+                // Attacker has first/double strike and kills this blocker
+                // before it can ever swing back - not a kill, not a trade,
+                // a straight loss. Never worth picking here (the later
+                // chump-block pass exists for "sacrifice anyway under
+                // pressure" - this method is specifically about blocks
+                // that are good regardless of how much danger I'm in).
+                continue;
+            }
+            boolean blockerWinsForFree = CombatMath.diesWithoutStriking(bPower, blockerHasDeathtouch, b.keywords, attackerToughness, attacker.keywords);
+            boolean blockerKillsAttacker = blockerWinsForFree || bPower >= attackerToughness || (blockerHasDeathtouch && bPower > 0);
+            // blockerWinsForFree on its own already guarantees survival
+            // (attacker is dead before it can deal damage), regardless of
+            // raw toughness - a small first-strike blocker can profitably
+            // eat a much bigger non-first-strike attacker and live.
+            boolean blockerSurvives = blockerWinsForFree || (!attackerHasDeathtouch && bToughness > attackerPower);
             if (blockerKillsAttacker && blockerSurvives && blockerValue < bestKillValue) {
                 bestKillValue = blockerValue;
                 bestKill = o;
@@ -172,6 +200,23 @@ public class GenericBlockStrategy implements BlockStrategy {
                 return;
             }
         }
+    }
+
+    /** How much of an attacker's power a chump block actually absorbs -
+     * not always all of it (forge-ai audit Tier 2 #5). A non-trampler is
+     * fully stopped, same as before. A trampler only needs to assign
+     * lethal damage to the chump (the chump's toughness, or just 1 with
+     * deathtouch) before the rest carries straight through to me - a
+     * single small chump barely dents a big trampler's damage, and a
+     * deathtouch trampler tramples for almost everything regardless of
+     * what it's chump-blocked by. */
+    private static int absorbedByChump(CardStateView attacker, CardStateView chump) {
+        int attackerPower = power(attacker);
+        if (!hasKeyword(attacker.keywords, "Trample")) {
+            return attackerPower;
+        }
+        int lethalNeeded = hasKeyword(attacker.keywords, "Deathtouch") ? 1 : toughness(chump);
+        return Math.min(attackerPower, lethalNeeded);
     }
 
     private DecisionRequest.Option cheapestAvailable(List<DecisionRequest.Option> options, Set<String> used) {
