@@ -16,6 +16,13 @@ public class DecisionRequest {
     /** Only meaningful for CHOOSE_LIST: how many of `options` must/may be picked. */
     public Integer min;
     public Integer max;
+    /** Only set for MULLIGAN_KEEP: how many cards this mulligan round would
+     * tuck back if not kept (0 on the very first, never-mulliganed hand,
+     * growing with each subsequent mulligan under the London rule) - lets
+     * the mulligan strategy lower its standards as it digs, rather than
+     * applying the same bar to a fresh 7 and an already-mulliganed-several-
+     * times hand alike. */
+    public Integer mulliganCardsToReturn;
     /** Only meaningful for DECLARE_BLOCKERS: one group per attacker, so the
      * whole combat can be shown and answered in a single request instead of
      * one CHOOSE_LIST per attacker in sequence. */

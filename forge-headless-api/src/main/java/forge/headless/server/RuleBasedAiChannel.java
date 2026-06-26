@@ -59,7 +59,8 @@ public class RuleBasedAiChannel implements RemoteChannel {
 
         switch (request.type) {
             case "MULLIGAN_KEEP":
-                response.booleanValue = brain.mulliganStrategy.keepHand(state);
+                response.booleanValue = brain.mulliganStrategy.keepHand(state,
+                        request.mulliganCardsToReturn != null ? request.mulliganCardsToReturn : 0);
                 break;
             case "CONFIRM":
             case "CONFIRM_ACTION":

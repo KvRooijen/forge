@@ -17,10 +17,21 @@ import java.util.Set;
  * with "the right number" of lands but the wrong colors, or nothing but
  * 6+ CMC bombs with no early play, is barely better than a screwed hand -
  * it just doesn't show up as one from land count alone.
+ *
+ * Standards relax as cardsToReturn grows (how many cards the *next*
+ * mulligan would tuck back, under the London rule - 0 on a fresh hand,
+ * rising with each mulligan already taken). Without this, the exact same
+ * bar applied to a fresh 7 and to the fourth consecutive re-draw alike -
+ * with no floor, this could (and did, before the LondonMulligan engine
+ * bug was separately fixed) spiral toward an almost-empty forced keep.
+ * Continuing to dig gets strictly more expensive (a smaller hand even if
+ * it's eventually kept) while the odds of drawing a "perfect" hand don't
+ * meaningfully improve, so past a certain depth a mediocre hand is simply
+ * worth more than the hand size lost digging further.
  */
 public class GenericMulliganStrategy implements MulliganStrategy {
     @Override
-    public boolean keepHand(GameStateView state) {
+    public boolean keepHand(GameStateView state, int cardsToReturn) {
         PlayerStateView you = AiUtils.you(state);
         List<CardStateView> hand = you != null && you.hand != null ? you.hand : List.of();
         List<CardStateView> lands = new ArrayList<>();
@@ -33,8 +44,16 @@ public class GenericMulliganStrategy implements MulliganStrategy {
             }
         }
         int landCount = lands.size();
-        if (landCount < 2 || landCount > 5) {
+        int landMin = cardsToReturn >= 2 ? 1 : 2;
+        int landMax = cardsToReturn >= 2 ? 6 : 5;
+        if (landCount < landMin || landCount > landMax) {
             return false;
+        }
+        if (cardsToReturn >= 4) {
+            // Dug deep enough that the cost of mulliganing again (an even
+            // smaller hand) outweighs being picky about curve/colors - any
+            // hand with a workable land count is worth keeping outright.
+            return true;
         }
 
         Set<String> producibleColors = new HashSet<>();

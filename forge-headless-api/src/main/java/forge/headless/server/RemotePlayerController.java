@@ -622,7 +622,9 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public boolean mulliganKeepHand(Player p, int cardsToReturn) {
-        DecisionResponse resp = ask("MULLIGAN_KEEP", "Keep your hand?", null);
+        DecisionRequest req = new DecisionRequest(UUID.randomUUID().toString(), "MULLIGAN_KEEP", "Keep your hand?", null, safeBuildStateView(player));
+        req.mulliganCardsToReturn = cardsToReturn;
+        DecisionResponse resp = channel.ask(req);
         return resp.booleanValue != null ? resp.booleanValue : true;
     }
 
@@ -2299,9 +2301,51 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public Card chooseSingleCardForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility sa, CardCollection fetchList, DelayedReveal delayedReveal, String selectPrompt, boolean isOptional, Player decider) {
+        // Was: isOptional always forced min to 0, and GenericListChoiceStrategy
+        // declines outright whenever min<=0 - so every "you may put a card
+        // from X into Y" effect was structurally incapable of ever being
+        // taken, no matter how good. Concretely: Teval, the Balanced
+        // Scale's "whenever Teval attacks, mill three, then you may return
+        // a land card from your graveyard to the battlefield tapped" -
+        // exactly this method, exactly this bug - meant the AI piloting
+        // Sultai Arisen could never use its own commander's core ability,
+        // every single game.
+        //
+        // Fix: an optional pick still defaults to "take it" when the move
+        // is toward a clearly better zone (graveyard/library -> hand/
+        // battlefield: recursion, search-and-get) - the overwhelmingly
+        // common shape of "you may" zone-change effects - and only falls
+        // back to declining (today's behavior) when it isn't a clear
+        // upgrade (e.g. an optional self-mill/exile, where declining is
+        // still the safer default absent card-specific knowledge).
+        boolean takeByDefault = isOptional && origin != null && origin.stream().anyMatch(o -> isZoneUpgrade(o, destination));
+        int effectiveMin = (!isOptional || takeByDefault) ? Math.min(1, fetchList.size()) : 0;
         List<Card> chosen = chooseFromList(selectPrompt != null ? selectPrompt : "Choose a card", new ArrayList<>(fetchList),
-                isOptional ? 0 : 1, 1, Card::toString, RemotePlayerController::cardIdOf);
+                effectiveMin, 1, Card::toString, RemotePlayerController::cardIdOf);
         return chosen.isEmpty() ? null : chosen.get(0);
+    }
+
+    /** Coarse "is moving a card from `from` to `to` generally good for its
+     * owner" - battlefield/hand are the zones a card is actually useful
+     * in, graveyard/exile are not (barring specific recursion strategies
+     * this can't see), library is genuinely ambiguous (could be a fetch
+     * landing it on top - fine - or burying it - bad) so deliberately
+     * scored as neutral rather than guessed either way. */
+    private static boolean isZoneUpgrade(ZoneType from, ZoneType to) {
+        return zoneUsefulness(to) > zoneUsefulness(from);
+    }
+
+    private static int zoneUsefulness(ZoneType z) {
+        if (z == ZoneType.Battlefield) {
+            return 2;
+        }
+        if (z == ZoneType.Hand) {
+            return 1;
+        }
+        if (z == ZoneType.Graveyard || z == ZoneType.Exile) {
+            return -1;
+        }
+        return 0;
     }
 
     @Override
