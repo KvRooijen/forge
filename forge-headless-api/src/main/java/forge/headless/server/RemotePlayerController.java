@@ -599,7 +599,8 @@ public class RemotePlayerController extends PlayerController {
                 c.isRoom() ? roomDoorOf(c, forge.card.CardStateName.RightSplit) : null,
                 keywords,
                 attachedTo != null ? String.valueOf(attachedTo.getId()) : null,
-                commanderTax, producedColors, entersTapped, c.getController() != null && c.getController().equals(player));
+                commanderTax, producedColors, entersTapped, c.getController() != null && c.getController().equals(player),
+                c.isCreature() ? classifyEtbRole(c) : null);
     }
 
     /** CardStateName.LeftSplit/RightSplit are the two fixed door slots a
@@ -958,6 +959,47 @@ public class RemotePlayerController extends PlayerController {
             forge.game.ability.ApiType.Sacrifice, forge.game.ability.ApiType.GainControl,
             forge.game.ability.ApiType.GainControlVariant);
 
+    /** Shared ApiType -> coarse role mapping, used both for "what does
+     * casting this spell do" (classifySpellRole) and "what does this
+     * creature's own ETB trigger do" (classifyEtbRole) - the same
+     * REMOVAL/SWEEPER/DRAW/RAMP categories apply whether the effect comes
+     * from casting the spell directly or from a creature entering.
+     *
+     * includeSacrifice exists because bare Sacrifice (not SacrificeAll)
+     * is genuinely ambiguous in direction: an Edict spell ("opponent
+     * sacrifices a creature") is real removal, but the *exact same*
+     * ApiType backs the extremely common ETB pattern of sacrificing one
+     * of *your own* other creatures for value (Disciple of Bolas: "When
+     * this enters, sacrifice another creature, gain X life and draw X
+     * cards" - SacValid$ Creature.Other, no opponent involved at all).
+     * Confirmed live that classifyEtbRole was misreading this exact card
+     * as REMOVAL before this split - treating "I can sacrifice my own
+     * stuff" as if it threatens the opponent's board would be an
+     * actively wrong signal, not just a missed one. classifyEtbRole
+     * passes false; classifySpellRole (where a direct Sacrifice spell is
+     * far more often an Edict effect) keeps the more permissive true. */
+    private static String classifyApiRole(forge.game.ability.ApiType api, boolean includeSacrifice) {
+        if (api == null) {
+            return null;
+        }
+        if (api == forge.game.ability.ApiType.Mana) {
+            return "RAMP";
+        }
+        if (SWEEPER_APIS.contains(api)) {
+            return "SWEEPER";
+        }
+        if (api == forge.game.ability.ApiType.Sacrifice && !includeSacrifice) {
+            return null;
+        }
+        if (SINGLE_REMOVAL_APIS.contains(api)) {
+            return "REMOVAL";
+        }
+        if (api == forge.game.ability.ApiType.Draw || api == forge.game.ability.ApiType.Dig) {
+            return "DRAW";
+        }
+        return null;
+    }
+
     /** Coarse, high-confidence-only "what does casting this spell do"
      * classification, so the AI can value a spell by its effect on the
      * current board rather than by mana cost alone (see
@@ -966,7 +1008,8 @@ public class RemotePlayerController extends PlayerController {
      * everything ambiguous returns null and the AI falls back to its CMC
      * proxy. Order matters: a creature spell that also has an ETB removal
      * effect should still read as CREATURE (its body is the durable
-     * value), so the permanent-type check comes first. */
+     * value, scored separately via CardStateView.etbRole - see
+     * classifyEtbRole), so the permanent-type check comes first. */
     private static String classifySpellRole(SpellAbility sa) {
         if (sa == null || !sa.isSpell()) {
             // Activated/mana abilities of permanents already in play aren't
@@ -977,21 +1020,47 @@ public class RemotePlayerController extends PlayerController {
         if (host != null && host.isCreature()) {
             return "CREATURE";
         }
-        forge.game.ability.ApiType api = sa.getApi();
-        if (api == null) {
+        return classifyApiRole(sa.getApi(), true);
+    }
+
+    /** Coarse, high-confidence-only "what does this permanent's own
+     * 'when this enters' trigger do" classification - without this, a
+     * vanilla 4/4 and a 4/4 "when this enters, destroy target creature"
+     * (or draw two cards, or ramp) score *identically*, since
+     * CreatureValue/valueOf otherwise only look at power/toughness/
+     * keywords. Modern Magic - Commander especially - leans heavily on
+     * exactly this pattern (value creatures: an effect stapled to a
+     * body), so leaving it unscored was a real, not cosmetic, gap.
+     *
+     * Deliberately narrow: only "Mode$ ChangesZone, Destination$
+     * Battlefield, ValidCard$ ...Self..." triggers (the textbook "when
+     * CARDNAME enters" pattern) are inspected - other triggers (attack
+     * triggers, anthem-style statics, "whenever you cast", death
+     * triggers) are a different, not-yet-attempted category, not folded
+     * in here to avoid overclaiming confidence this doesn't have. Reuses
+     * the exact same ApiType classification as classifySpellRole, via
+     * Trigger.ensureAbility() resolving the trigger's "Execute" SVar into
+     * a real SpellAbility - the same mechanism that already backs
+     * targetIntent/spellRole, not a new guess. */
+    private static String classifyEtbRole(Card host) {
+        if (host == null) {
             return null;
         }
-        if (api == forge.game.ability.ApiType.Mana) {
-            return "RAMP";
-        }
-        if (SWEEPER_APIS.contains(api)) {
-            return "SWEEPER";
-        }
-        if (SINGLE_REMOVAL_APIS.contains(api)) {
-            return "REMOVAL";
-        }
-        if (api == forge.game.ability.ApiType.Draw || api == forge.game.ability.ApiType.Dig) {
-            return "DRAW";
+        for (forge.game.trigger.Trigger trig : host.getTriggers()) {
+            if (trig.getMode() != forge.game.trigger.TriggerType.ChangesZone) {
+                continue;
+            }
+            if (!"Battlefield".equals(trig.getParamOrDefault("Destination", ""))) {
+                continue;
+            }
+            if (!trig.getParamOrDefault("ValidCard", "").contains("Self")) {
+                continue;
+            }
+            SpellAbility etbSa = trig.ensureAbility();
+            String role = classifyApiRole(etbSa != null ? etbSa.getApi() : null, false);
+            if (role != null) {
+                return role;
+            }
         }
         return null;
     }

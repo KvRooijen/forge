@@ -65,6 +65,15 @@ public class CardStateView {
      * Card-backed option (e.g. picking a target), without needing a
      * separate signal threaded through every call site individually. */
     public boolean controllerIsYou;
+    /** Coarse, high-confidence-only classification of what this card's
+     * own "when this enters" trigger does ("REMOVAL"/"SWEEPER"/"DRAW"/
+     * "RAMP"), from RemotePlayerController.classifyEtbRole - null when
+     * there's no ETB trigger, or it doesn't match the narrow set of
+     * patterns classified with confidence. Without this, a vanilla
+     * creature and one with a powerful ETB (the single most common value
+     * pattern in modern Magic/Commander) score identically by stats
+     * alone - see GenericSpellSequencer.valueOf. */
+    public String etbRole;
 
     public static class RoomDoor {
         public String name;
@@ -86,7 +95,7 @@ public class CardStateView {
             String attackingTarget, String blockingAttacker, boolean producesMana,
             RoomDoor leftDoor, RoomDoor rightDoor, List<String> keywords,
             String attachedToId, Integer commanderTax, List<String> producedColors, boolean entersTapped,
-            boolean controllerIsYou) {
+            boolean controllerIsYou, String etbRole) {
         this.id = id;
         this.name = name;
         this.manaCost = manaCost;
@@ -109,5 +118,6 @@ public class CardStateView {
         this.producedColors = producedColors;
         this.entersTapped = entersTapped;
         this.controllerIsYou = controllerIsYou;
+        this.etbRole = etbRole;
     }
 }

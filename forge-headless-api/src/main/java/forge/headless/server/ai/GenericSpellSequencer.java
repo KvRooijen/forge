@@ -341,6 +341,18 @@ public class GenericSpellSequencer implements SpellSequencer {
      *   chosen) when ahead
      * - DRAW: a steady board-independent refuel
      * - anything still unclassified: the CMC proxy, unchanged
+     *
+     * A creature's own "when this enters" trigger (CardStateView.etbRole
+     * - see RemotePlayerController.classifyEtbRole) is scored the same
+     * way and added *on top of* its stat value, not in place of it - a
+     * removal spell stapled to a body is strictly better than the same
+     * removal spell alone, since it leaves a permanent behind too.
+     * Without this, a vanilla 4/4 and a 4/4 "when this enters, destroy
+     * target creature" scored identically (stats are all CreatureValue
+     * and the old version of this method ever looked at) - a real gap,
+     * since exactly this pattern (an effect stapled to a body) is one of
+     * the most common power sources in modern Magic, Commander
+     * especially, not a marginal case.
      */
     private double valueOf(DecisionRequest.Option o, CardStateView card, int totalManaSources,
             List<CardStateView> opponentCreatures, List<CardStateView> myCreatures, double pressureRatio) {
@@ -367,9 +379,30 @@ public class GenericSpellSequencer implements SpellSequencer {
             // blockers, survives a single removal spell, better combat
             // math than one all-in body).
             value += 1.0;
-            return value; // creature body (+ ramp bonus for mana dorks) is the whole story
+            value += roleValue(card.etbRole, opponentCreatures, myCreatures);
+            return value; // creature body (+ ETB + ramp bonus for mana dorks) is the whole story
         }
 
+        if (!isRamp) {
+            if (role != null) {
+                value += roleValue(role, opponentCreatures, myCreatures);
+            } else {
+                // Planeswalker / enchantment engine / pump / unclassified -
+                // no reliable effect signal, fall back to CMC as a rough
+                // proxy rather than treating it as worthless, same as before.
+                value += ManaUtils.manaValue(card.manaCost);
+            }
+        }
+        return value;
+    }
+
+    /** The REMOVAL/SWEEPER/DRAW board-aware scoring shared between "what
+     * does casting this spell do" and "what does this creature's own ETB
+     * trigger do" - same categories, same logic, whichever source the
+     * role classification came from. Returns 0 for RAMP (handled
+     * separately via the mana-source-count taper above, not here) and
+     * for null/unclassified. */
+    private double roleValue(String role, List<CardStateView> opponentCreatures, List<CardStateView> myCreatures) {
         if ("REMOVAL".equals(role)) {
             double bestTarget = 0;
             for (CardStateView c : opponentCreatures) {
@@ -378,8 +411,9 @@ public class GenericSpellSequencer implements SpellSequencer {
             // A small floor (not zero) keeps removal castable when it's the
             // only legal play, but well below casting an actual threat -
             // the point is to stop spending removal on an empty board.
-            value += bestTarget > 0 ? bestTarget : 0.5;
-        } else if ("SWEEPER".equals(role)) {
+            return bestTarget > 0 ? bestTarget : 0.5;
+        }
+        if ("SWEEPER".equals(role)) {
             double opp = 0;
             for (CardStateView c : opponentCreatures) {
                 opp += CreatureValue.of(c);
@@ -391,19 +425,15 @@ public class GenericSpellSequencer implements SpellSequencer {
             // Negative when I'd lose more than the opponent - the knapsack
             // then simply never includes it (not-casting always scores
             // higher), which is exactly "don't wipe when you're ahead".
-            value += opp - mine;
-        } else if ("DRAW".equals(role)) {
+            return opp - mine;
+        }
+        if ("DRAW".equals(role)) {
             // Roughly a mid-curve play's worth - competes with creatures
             // without dominating them, so the AI refuels when there's
             // nothing more impactful to do but doesn't draw instead of
             // developing a threatening board.
-            value += 3.0;
-        } else if (!isRamp) {
-            // Planeswalker / enchantment engine / pump / unclassified - no
-            // reliable effect signal, fall back to CMC as a rough proxy
-            // rather than treating it as worthless, same as before.
-            value += ManaUtils.manaValue(card.manaCost);
+            return 3.0;
         }
-        return value;
+        return 0;
     }
 }
