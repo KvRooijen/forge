@@ -14,25 +14,32 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Two passes, same spirit as AttackStrategy's combat math - tractable
+ * Three passes, same spirit as AttackStrategy's combat math - tractable
  * because Magic has no hidden battlefield information, every attacker's
  * power/toughness/keywords are fully known:
  *
- * 1. "Free" blocks first, regardless of life total: a blocker that kills
- *    the attacker without dying (a clean kill), or a mutual trade where
- *    the attacker is worth more than the blocker - both are good
+ * 1. "Free" single-blocks first, regardless of life total: a blocker that
+ *    kills the attacker without dying (a clean kill), or a mutual trade
+ *    where the attacker is worth more than the blocker - both are good
  *    regardless of how much danger I'm in. Uses the *cheapest* qualifying
  *    blocker for each, saving more valuable creatures for later turns.
- * 2. Chump-blocking to survive: only if the attackers still unblocked
- *    after pass 1 would deal lethal-or-more damage, sacrifice the
+ * 2. Gang-blocking: for attackers no single blocker can answer, try
+ *    increasing-size combinations of the cheapest remaining blockers
+ *    (starting at 2) whose combined power kills the attacker. Worst-case
+ *    assumes the attacker's controller assigns damage to kill every
+ *    blocker in the gang (combat damage assignment order is their
+ *    choice, not mine) - only commits if the *total* value of the gang
+ *    is still less than the attacker's value even under that worst case,
+ *    so this never accepts a bad trade hoping some blockers survive.
+ * 3. Chump-blocking to survive: only if the attackers still unblocked
+ *    after passes 1-2 would deal lethal-or-more damage, sacrifice the
  *    cheapest available creature against the biggest remaining
  *    attackers (most damage prevented per creature lost) until the
  *    remaining damage drops below my life total.
  *
- * Deliberately not modeled: gang-blocking (multiple creatures on one
- * attacker to kill something no single blocker can answer alone), first
- * strike/double strike combat-step ordering, and trample's
- * excess-damage carryover - all real simplifications, not oversights.
+ * Deliberately not modeled: first strike/double strike combat-step
+ * ordering, and trample's excess-damage carryover - real
+ * simplifications, not oversights.
  */
 public class GenericBlockStrategy implements BlockStrategy {
     @Override
@@ -51,6 +58,12 @@ public class GenericBlockStrategy implements BlockStrategy {
             if (freeBlock != null) {
                 result.put(g.id, List.of(freeBlock.id));
                 used.add(freeBlock.id);
+            }
+        }
+
+        for (DecisionRequest.Group g : byThreat) {
+            if (!result.containsKey(g.id)) {
+                tryGangBlock(g, result, used);
             }
         }
 
@@ -112,6 +125,53 @@ public class GenericBlockStrategy implements BlockStrategy {
             }
         }
         return bestKill != null ? bestKill : bestTrade;
+    }
+
+    /** Tries increasing-size combinations of the cheapest available
+     * blockers (2, then 3, ...) for one attacker that no single blocker
+     * answered. Commits to the first size whose combined power kills the
+     * attacker AND whose combined value is less than the attacker's
+     * value - i.e. still a good trade even in the worst case that every
+     * blocker in the gang dies, since the attacker's controller picks
+     * damage-assignment order and could concentrate it adversarially. */
+    private void tryGangBlock(DecisionRequest.Group g, Map<String, List<String>> result, Set<String> used) {
+        if (g.max < 2) {
+            return;
+        }
+        List<DecisionRequest.Option> available = new ArrayList<>();
+        for (DecisionRequest.Option o : g.options) {
+            if (!used.contains(o.id) && o.card != null) {
+                available.add(o);
+            }
+        }
+        if (available.size() < 2) {
+            return;
+        }
+        available.sort(Comparator.comparingDouble(o -> CreatureValue.of(o.card)));
+
+        int attackerToughness = toughness(g.attacker);
+        double attackerValue = CreatureValue.of(g.attacker);
+        int maxSize = Math.min(g.max, available.size());
+        int totalPower = 0;
+        double totalValue = 0;
+        for (int size = 1; size <= maxSize; size++) {
+            CardStateView next = available.get(size - 1).card;
+            totalPower += power(next);
+            totalValue += CreatureValue.of(next);
+            if (size < 2) {
+                continue; // a "gang" of one is just a single block, already tried in pass 1
+            }
+            if (totalPower >= attackerToughness && totalValue < attackerValue) {
+                List<String> ids = new ArrayList<>();
+                for (int i = 0; i < size; i++) {
+                    DecisionRequest.Option o = available.get(i);
+                    ids.add(o.id);
+                    used.add(o.id);
+                }
+                result.put(g.id, ids);
+                return;
+            }
+        }
     }
 
     private DecisionRequest.Option cheapestAvailable(List<DecisionRequest.Option> options, Set<String> used) {

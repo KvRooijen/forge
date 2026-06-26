@@ -27,6 +27,16 @@ import java.util.Map;
  * plain ground attacker), and the lethal check assumes the defender
  * blocks optimally (biggest unavoidable attackers first) rather than
  * searching every possible block assignment.
+ *
+ * A third piece beyond per-creature safety: the defender's blockers are a
+ * shared, exhaustible resource across every attacker I send, not an
+ * independent risk per creature. If I have more "risky" attackers (ones
+ * some blocker could cleanly kill) than they have blockers, they cannot
+ * possibly assign a killer to all of them - some get through guaranteed,
+ * regardless of which ones they pick - so it's worth sending all of them.
+ * Without this, three risky attackers each individually "unsafe" against
+ * a single shared potential killer blocker would all be declined, even
+ * though that one blocker can only actually stop one of them.
  */
 public class GenericAttackStrategy implements AttackStrategy {
     @Override
@@ -69,7 +79,8 @@ public class GenericAttackStrategy implements AttackStrategy {
             return options.stream().map(o -> o.id).toList();
         }
 
-        List<String> chosen = new ArrayList<>();
+        List<DecisionRequest.Option> safe = new ArrayList<>();
+        List<DecisionRequest.Option> risky = new ArrayList<>();
         for (DecisionRequest.Option o : options) {
             CardStateView card = o.cardId != null ? byId.get(o.cardId) : null;
             if (card == null) {
@@ -79,7 +90,27 @@ public class GenericAttackStrategy implements AttackStrategy {
             if (power <= 0) {
                 continue;
             }
-            if (isSafeOrFavorable(card, blockers)) {
+            (isSafeOrFavorable(card, blockers) ? safe : risky).add(o);
+        }
+
+        List<String> chosen = new ArrayList<>();
+        for (DecisionRequest.Option o : safe) {
+            chosen.add(o.id);
+        }
+        // The defender has at most blockers.size() total blocks to hand
+        // out. If I send more "risky" attackers (ones SOME blocker could
+        // cleanly kill) than they have blockers, they literally can't
+        // assign a killer to every one of them - some are guaranteed
+        // through no matter which ones they pick, so it's worth sending
+        // all of them. If risky.size() <= blockers.size() they can
+        // profitably kill every single one for free, so send none.
+        // Deliberately a hard threshold rather than partial commitment -
+        // we don't know which specific attackers the defender will
+        // choose to block, so committing fewer than all risky attackers
+        // risks the defender killing exactly those and realizing none of
+        // the guaranteed-through benefit.
+        if (!risky.isEmpty() && risky.size() > blockers.size()) {
+            for (DecisionRequest.Option o : risky) {
                 chosen.add(o.id);
             }
         }
