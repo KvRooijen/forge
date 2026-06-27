@@ -431,7 +431,11 @@ public class BatchRunner {
         return results;
     }
 
-    private static List<String> parseCsvLine(String line) {
+    // Package-private (not private) so DecisionLogStats, which needs to
+    // join game outcomes against decision-log games by row order, can
+    // reuse the exact same parsing instead of a second copy that could
+    // drift out of sync with writeCsv's actual quoting rules.
+    static List<String> parseCsvLine(String line) {
         List<String> fields = new ArrayList<>();
         StringBuilder cur = new StringBuilder();
         boolean inQuotes = false;
