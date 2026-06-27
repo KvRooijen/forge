@@ -1817,6 +1817,7 @@ public class RemotePlayerController extends PlayerController {
             String cardId = host != null ? String.valueOf(host.getId()) : null;
             DecisionRequest.Option option = new DecisionRequest.Option(String.valueOf(i), sa.toString(), cardId, host != null ? toCardView(host) : null);
             option.spellRole = classifySpellRole(sa);
+            option.manaCost = sa.getPayCosts() != null ? sa.getPayCosts().getTotalMana().toString() : null;
             options.add(option);
         }
         options.add(new DecisionRequest.Option(END_TURN_OPTION, "End Turn", null));
@@ -2350,8 +2351,21 @@ public class RemotePlayerController extends PlayerController {
 
     @Override
     public List<Card> chooseCardsForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility sa, CardCollection fetchList, int min, int max, DelayedReveal delayedReveal, String selectPrompt, Player decider) {
+        // Same bug as chooseSingleCardForZoneChange's fix (see its comment
+        // for the full story), just never covered there since it's a
+        // separate method for the plural "choose up to N" shape - e.g.
+        // Migration Path's "search your library for up to two basic land
+        // cards, put them onto the battlefield tapped" has min=0/max=2,
+        // and GenericListChoiceStrategy declines outright whenever
+        // min<=0, so every "search for up to N" land-ramp effect was
+        // silently grabbing nothing, every single time, regardless of how
+        // many it was allowed to take. Same fix: default to taking the
+        // maximum allowed (not just the engine's true minimum) whenever
+        // the move is toward a clearly better zone.
+        boolean takeMaxByDefault = origin != null && origin.stream().anyMatch(o -> isZoneUpgrade(o, destination));
+        int effectiveMin = takeMaxByDefault ? Math.min(max, fetchList.size()) : min;
         return chooseFromList(selectPrompt != null ? selectPrompt : "Choose cards", new ArrayList<>(fetchList),
-                min, max, Card::toString, RemotePlayerController::cardIdOf);
+                effectiveMin, max, Card::toString, RemotePlayerController::cardIdOf);
     }
 
     @Override

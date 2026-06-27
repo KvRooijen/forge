@@ -123,10 +123,11 @@ public class GenericSpellSequencer implements SpellSequencer {
             if (!card.isCommander) {
                 continue;
             }
-            if (ManaUtils.manaValue(card.manaCost) > availableMana) {
+            String manaCost = effectiveManaCost(o, card);
+            if (ManaUtils.manaValue(manaCost) > availableMana) {
                 continue;
             }
-            if (colorAffordable(card, manaSources)) {
+            if (colorAffordable(manaCost, manaSources)) {
                 return o;
             }
         }
@@ -160,8 +161,9 @@ public class GenericSpellSequencer implements SpellSequencer {
                 continue;
             }
             CardStateView card = castableIds.get(cardId);
-            int cmc = ManaUtils.manaValue(card.manaCost);
-            if (cmc > availableMana || !colorAffordable(card, manaSources)) {
+            String manaCost = effectiveManaCost(o, card);
+            int cmc = ManaUtils.manaValue(manaCost);
+            if (cmc > availableMana || !colorAffordable(manaCost, manaSources)) {
                 // Purely informational - see DecisionRequest.Option.castable's
                 // javadoc - doesn't change anything else here.
                 o.castable = false;
@@ -219,8 +221,9 @@ public class GenericSpellSequencer implements SpellSequencer {
 
             int worst = -1;
             for (int idx : chosen) {
-                CardStateView card = castableIds.get(candidates.get(idx).cardId);
-                if (ManaUtils.colorPipCounts(card.manaCost).isEmpty()) {
+                DecisionRequest.Option candidate = candidates.get(idx);
+                CardStateView card = castableIds.get(candidate.cardId);
+                if (ManaUtils.colorPipCounts(effectiveManaCost(candidate, card)).isEmpty()) {
                     continue; // excluding a colorless card can't fix color contention
                 }
                 if (worst == -1 || values.get(idx) < values.get(worst)) {
@@ -261,8 +264,18 @@ public class GenericSpellSequencer implements SpellSequencer {
         return chosen;
     }
 
-    private boolean colorAffordable(CardStateView card, List<CardStateView> manaSources) {
-        for (String color : ManaUtils.colorsInCost(card.manaCost)) {
+    /** A spell-ability's actual cost when known (see
+     * DecisionRequest.Option.manaCost's javadoc - an alternate-cost
+     * ability like Cycling shares its host card but has a wholly
+     * different cost than that card's normal cast), falling back to the
+     * host card's own mana cost only when the option wasn't built with one
+     * (shouldn't happen for real spell options reaching this far). */
+    private static String effectiveManaCost(DecisionRequest.Option o, CardStateView card) {
+        return o.manaCost != null ? o.manaCost : card.manaCost;
+    }
+
+    private boolean colorAffordable(String manaCost, List<CardStateView> manaSources) {
+        for (String color : ManaUtils.colorsInCost(manaCost)) {
             boolean hasUntappedSource = manaSources.stream()
                     .anyMatch(s -> !s.tapped && s.producedColors != null && s.producedColors.contains(color));
             if (!hasUntappedSource) {
@@ -283,8 +296,9 @@ public class GenericSpellSequencer implements SpellSequencer {
             Map<String, CardStateView> castableIds, List<CardStateView> manaSources) {
         List<String> pips = new ArrayList<>();
         for (int idx : chosenIndices) {
-            CardStateView card = castableIds.get(candidates.get(idx).cardId);
-            for (Map.Entry<String, Integer> e : ManaUtils.colorPipCounts(card.manaCost).entrySet()) {
+            DecisionRequest.Option candidate = candidates.get(idx);
+            CardStateView card = castableIds.get(candidate.cardId);
+            for (Map.Entry<String, Integer> e : ManaUtils.colorPipCounts(effectiveManaCost(candidate, card)).entrySet()) {
                 for (int i = 0; i < e.getValue(); i++) {
                     pips.add(e.getKey());
                 }
@@ -411,8 +425,10 @@ public class GenericSpellSequencer implements SpellSequencer {
             } else {
                 // Planeswalker / enchantment engine / pump / unclassified -
                 // no reliable effect signal, fall back to CMC as a rough
-                // proxy rather than treating it as worthless, same as before.
-                value += ManaUtils.manaValue(card.manaCost);
+                // proxy rather than treating it as worthless, same as before -
+                // this option's own cost (see effectiveManaCost), not
+                // necessarily the host card's normal-cast cost.
+                value += ManaUtils.manaValue(effectiveManaCost(o, card));
             }
             // A noncreature anthem (Glorious Anthem) is real, additive
             // team-buff value on top of whatever else this spell does -

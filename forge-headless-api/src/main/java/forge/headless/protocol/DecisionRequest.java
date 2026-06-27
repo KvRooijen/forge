@@ -86,6 +86,18 @@ public class DecisionRequest {
          * library), since the player legitimately sees them at decision
          * time even though we don't otherwise serialize that zone. */
         public CardStateView card;
+        /** Only set on CHOOSE_SPELL_ABILITY options: this *specific
+         * ability's* own actual mana cost (SpellAbility.getPayCosts().
+         * getTotalMana()), which is NOT always the same as card.manaCost -
+         * an alternate-cost ability (Cycling, Flashback, ...) shares the
+         * same host card as its normal cast but has a completely different
+         * cost (e.g. Migration Path costs {3}{G} to cast normally but only
+         * {2} to cycle). Using card.manaCost for affordability on every
+         * option sharing that card marks alternate-cost abilities
+         * incorrectly castable/uncastable. Falls back to card.manaCost
+         * when null (shouldn't happen for real spell options, but cheap
+         * insurance). */
+        public String manaCost;
         /** Only set on CHOOSE_SPELL_ABILITY options: a coarse,
          * high-confidence classification of what casting this spell does
          * ("REMOVAL"/"SWEEPER"/"DRAW"/"RAMP"/"CREATURE"), derived from the
