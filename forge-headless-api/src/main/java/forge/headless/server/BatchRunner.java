@@ -120,6 +120,15 @@ public class BatchRunner {
             String javaBin = ProcessHandle.current().info().command().orElse("java");
             String classpath = System.getProperty("java.class.path");
             String resDir = System.getProperty("forge.res.dir");
+            // Workers are separate JVM processes, not threads - a -D system
+            // property set on this (parent) process is invisible to them
+            // unless explicitly forwarded, same as forge.res.dir already
+            // is below. Without this, -Dforge.headless.decisionLog on the
+            // parent silently logs nothing once --workers > 1. Sharded
+            // per-worker like --out already is, rather than one shared
+            // path - multiple JVM processes appending to the same file
+            // concurrently isn't safe to assume atomic across platforms.
+            String decisionLogPath = System.getProperty("forge.headless.decisionLog");
 
             System.out.printf("Spawning %d worker process(es)...%n", workers);
             for (int i = 0; i < workers; i++) {
@@ -133,6 +142,9 @@ public class BatchRunner {
                 cmd.add(classpath);
                 if (resDir != null) {
                     cmd.add("-Dforge.res.dir=" + resDir);
+                }
+                if (decisionLogPath != null) {
+                    cmd.add("-Dforge.headless.decisionLog=" + decisionLogPath + ".shard" + i + ".jsonl");
                 }
                 cmd.add("forge.headless.server.BatchRunner");
                 // strip the parent's own --out so it can't shadow the
