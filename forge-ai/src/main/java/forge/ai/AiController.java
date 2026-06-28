@@ -1675,6 +1675,7 @@ public class AiController {
         });
 
         Thread t = new Thread(future, "Game AI Eval");
+        t.setDaemon(true);
         t.start();
         try {
             return future.get(game.getAITimeout(), TimeUnit.SECONDS);
@@ -1683,9 +1684,19 @@ public class AiController {
                 e.printStackTrace();
                 t.stop();
             } catch (UnsupportedOperationException | NoSuchMethodError ex) {
-                // Stop support: dropped by Android and Java 20 / 26 removed it completely - so sadly thread will keep running
+                // Stop support: dropped by Android and Java 20 / 26 removed it completely - so the
+                // thread keeps running (interrupt() alone can't break a pure CPU-bound loop that
+                // never checks for it). Left at normal priority, an accumulation of these orphans
+                // across a long batch with several parallel game processes was observed to starve
+                // every other in-flight game's own AI evaluation of CPU, turning a rare ~1-4%
+                // per-decision timeout into a cascading 30-70%+ game-timeout rate - confirmed via a
+                // controlled before/after comparison that ruled out everything else (concurrent
+                // unrelated load, code changes elsewhere) as the cause. Demoting priority doesn't
+                // stop the orphan, but stops it from competing for CPU with everything that's still
+                // making real progress, which is what actually matters here.
                 timeoutReached = true;
                 future.cancel(true);
+                t.setPriority(Thread.MIN_PRIORITY);
                 // TODO wait a few more seconds to try and exit at a safe point before letting the engine continue
                 // TODO mark some as skipped to increase chance to find something playable next priority
             }
