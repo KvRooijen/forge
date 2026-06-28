@@ -41,6 +41,13 @@ public class GenericLandPlayStrategy implements LandPlayStrategy {
         double bestScore = Double.NEGATIVE_INFINITY;
         for (DecisionRequest.Option o : landOptions) {
             double score = scoreLand(o.card, colorsNeeded, colorsAlreadyAvailable, haveCastableNow);
+            // Surfaced into the option itself (not just used to pick the
+            // winner) so decision logs show the actual color-need/tapped-
+            // tempo reasoning behind a land choice - without this,
+            // RuleBasedAiChannel's generic logging fallback (CreatureValue,
+            // power/toughness based) scores every land 0, making the log
+            // look like lands are picked blindly when they aren't.
+            o.value = score;
             if (score > bestScore) {
                 bestScore = score;
                 best = o;
@@ -73,7 +80,20 @@ public class GenericLandPlayStrategy implements LandPlayStrategy {
         score += produced.size() * 0.3;
 
         if (land.entersTapped) {
-            score += haveCastableNow ? -2 : 0.5;
+            // On a turn where nothing is castable regardless of which
+            // land gets played, the *order* multiple lands go down in
+            // doesn't change what colors I'll have access to by next
+            // turn (I'll have played all of them eventually either way) -
+            // the only thing that depends on today's pick is whether a
+            // tapped land gets deferred into a future turn where it
+            // actually costs tempo. So this needs to outweigh ordinary
+            // single-color fixing (+5 max) and not just nudge it (+0.5
+            // was lost to any land matching even one needed color,
+            // confirmed live: a tapped dual got deferred past its only
+            // free turn and ended up scoring negative two turns later).
+            // Still loses to a genuinely exceptional fixer (2+ needed
+            // colors at once, 10+), which should rightly come first.
+            score += haveCastableNow ? -2 : 6;
         } else if (!haveCastableNow) {
             // Mild preference to save the more flexible untapped land for
             // a turn it actually matters.

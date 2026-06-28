@@ -465,9 +465,11 @@ public class RemotePlayerController extends PlayerController {
         // already top-of-stack (most recently added, next to resolve) first.
         for (forge.game.spellability.SpellAbilityStackInstance si : g.getStack()) {
             Card source = si.getSourceCard();
-            result.add(new GameStateView.StackItemView(
+            GameStateView.StackItemView item = new GameStateView.StackItemView(
                     source != null ? toCardView(source) : null,
-                    si.getStackDescription()));
+                    si.getStackDescription());
+            item.spellRole = classifySpellRole(si.getSpellAbility());
+            result.add(item);
         }
         return result;
     }
@@ -1002,11 +1004,18 @@ public class RemotePlayerController extends PlayerController {
      * actively wrong signal, not just a missed one. classifyEtbRole
      * passes false; classifySpellRole (where a direct Sacrifice spell is
      * far more often an Edict effect) keeps the more permissive true. */
-    private static String classifyApiRole(forge.game.ability.ApiType api, boolean includeSacrifice) {
+    private static String classifyApiRole(SpellAbility sa, boolean includeSacrifice) {
+        if (sa == null) {
+            return null;
+        }
+        forge.game.ability.ApiType api = sa.getApi();
         if (api == null) {
             return null;
         }
         if (api == forge.game.ability.ApiType.Mana) {
+            return "RAMP";
+        }
+        if (api == forge.game.ability.ApiType.ChangeZone && isLandRamp(sa)) {
             return "RAMP";
         }
         if (SWEEPER_APIS.contains(api)) {
@@ -1022,6 +1031,21 @@ public class RemotePlayerController extends PlayerController {
             return "DRAW";
         }
         return null;
+    }
+
+    /** Narrow "search library for a land, put it onto the battlefield"
+     * pattern (Rampant Growth, Cultivate, Farseek, Migration Path, ...) -
+     * the textbook Commander ramp-spell shape, which is built on
+     * ChangeZone rather than the Mana API. Deliberately specific (Origin
+     * must be Library, Destination Battlefield, ChangeType must mention
+     * Land) rather than tagging ChangeZone broadly, since that API also
+     * covers exile, flicker, tutor-to-hand, mill, and bounce - tagging
+     * all of those as RAMP would be actively wrong, not just imprecise. */
+    private static boolean isLandRamp(SpellAbility sa) {
+        String origin = sa.getParamOrDefault("Origin", "");
+        String destination = sa.getParamOrDefault("Destination", "");
+        String changeType = sa.getParamOrDefault("ChangeType", "");
+        return origin.contains("Library") && "Battlefield".equals(destination) && changeType.contains("Land");
     }
 
     /** Coarse, high-confidence-only "what does casting this spell do"
@@ -1044,7 +1068,7 @@ public class RemotePlayerController extends PlayerController {
         if (host != null && host.isCreature()) {
             return "CREATURE";
         }
-        return classifyApiRole(sa.getApi(), true);
+        return classifyApiRole(sa, true);
     }
 
     /** Coarse, high-confidence-only "what does this permanent's own
@@ -1081,7 +1105,7 @@ public class RemotePlayerController extends PlayerController {
                 continue;
             }
             SpellAbility etbSa = trig.ensureAbility();
-            String role = classifyApiRole(etbSa != null ? etbSa.getApi() : null, false);
+            String role = classifyApiRole(etbSa, false);
             if (role != null) {
                 return role;
             }
@@ -1116,7 +1140,7 @@ public class RemotePlayerController extends PlayerController {
                 continue;
             }
             SpellAbility deathSa = trig.ensureAbility();
-            String role = classifyApiRole(deathSa != null ? deathSa.getApi() : null, false);
+            String role = classifyApiRole(deathSa, false);
             if (role != null) {
                 return role;
             }
@@ -1143,7 +1167,7 @@ public class RemotePlayerController extends PlayerController {
                 continue;
             }
             SpellAbility attackSa = trig.ensureAbility();
-            String role = classifyApiRole(attackSa != null ? attackSa.getApi() : null, false);
+            String role = classifyApiRole(attackSa, false);
             if (role != null) {
                 return role;
             }
@@ -1906,7 +1930,7 @@ public class RemotePlayerController extends PlayerController {
         }
         double[] scores = new double[possible.size()];
         for (int i = 0; i < possible.size(); i++) {
-            String role = classifyApiRole(possible.get(i).getApi(), true);
+            String role = classifyApiRole(possible.get(i), true);
             scores[i] = SpellRoleValue.of(role, opp, mine);
         }
         return scores;

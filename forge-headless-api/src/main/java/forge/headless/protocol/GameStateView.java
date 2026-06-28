@@ -27,6 +27,18 @@ public class GameStateView {
     public static class StackItemView {
         public CardStateView source;
         public String description;
+        /** Same coarse REMOVAL/SWEEPER/DRAW/RAMP/CREATURE classification
+         * as DecisionRequest.Option.spellRole (see its javadoc), computed
+         * the same way (RemotePlayerController.classifySpellRole) but for
+         * *any* spell on the stack, not just options offered to the
+         * viewer - the stack is a public zone, so this is the same
+         * information either player could see for themselves, just
+         * pre-classified. Lets offline analysis (DecisionLogStats) count
+         * removal/sweeper/ramp spells cast by *either* player, not only
+         * the logging side - source.controllerIsYou says which. Null for
+         * non-spell stack items (triggered/activated abilities) and
+         * unclassified spells, same as Option.spellRole. */
+        public String spellRole;
 
         public StackItemView() { }
 
