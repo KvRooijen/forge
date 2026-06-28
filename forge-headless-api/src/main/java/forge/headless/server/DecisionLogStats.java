@@ -47,7 +47,7 @@ public final class DecisionLogStats {
 
     public static void main(String[] args) throws IOException {
         if (args.length < 3) {
-            System.err.println("Usage: DecisionLogStats <out.txt> <resultsCsv> <shard0.jsonl> [shard1.jsonl ...]");
+            System.err.println("Usage: DecisionLogStats <out.txt|out.html> <resultsCsv> <shard0.jsonl> [shard1.jsonl ...]");
             System.exit(1);
         }
         Map<String, GameTrack> games = new LinkedHashMap<>();
@@ -60,10 +60,13 @@ public final class DecisionLogStats {
         }
         joinOutcomes(args[1], games, shardBoundaries);
 
-        try (BufferedWriter out = Files.newBufferedWriter(Path.of(args[0]), StandardCharsets.UTF_8)) {
-            out.write(report(games));
+        Aggregation agg = aggregate(games);
+        String outPath = args[0];
+        String content = outPath.endsWith(".html") ? DecisionLogHtmlReport.render(agg, TURN_CHECKPOINTS) : report(agg, games.size());
+        try (BufferedWriter out = Files.newBufferedWriter(Path.of(outPath), StandardCharsets.UTF_8)) {
+            out.write(content);
         }
-        System.out.println("Wrote " + args[0] + " (" + games.size() + " games)");
+        System.out.println("Wrote " + outPath + " (" + games.size() + " games)");
     }
 
     private static void ingest(String line, Map<String, GameTrack> games) {
@@ -102,8 +105,75 @@ public final class DecisionLogStats {
                     }
                 }
             }
+            // Mana rocks/dorks specifically (nonland producesMana
+            // permanents) - keyed by card id, first sighting only, so a
+            // rock that sticks around for the rest of the game is counted
+            // once, but a second one cast later (even after the first was
+            // destroyed) still counts - works equally for both sides,
+            // unlike spellRole-based tracking below, since this only
+            // needs the public battlefield, not catching the cast itself
+            // on the stack.
+            Set<String> seenRocks = track.seenManaRockIds.computeIfAbsent(isYou, k -> new HashSet<>());
+            for (JsonNode c : p.path("battlefield")) {
+                if (c.path("producesMana").asBoolean() && !c.path("typeLine").asText("").contains("Land")) {
+                    String id = c.path("id").asText("");
+                    if (!id.isEmpty() && seenRocks.add(id)) {
+                        if (isYou) {
+                            track.manaRocksYou++;
+                        } else {
+                            track.manaRocksOpp++;
+                        }
+                    }
+                }
+            }
             track.maxTurn = Math.max(track.maxTurn, turn);
         }
+
+        // Stack is a public zone - both players' spells are visible there
+        // before they resolve, classified the same way as our own options
+        // (RemotePlayerController.classifySpellRole), so REMOVAL/SWEEPER/
+        // RAMP spells cast by *either* side are countable, not just ours.
+        // Approximate, unlike the chosen-option counters below: depends on
+        // the AI actually being asked a decision (and thus logging a
+        // snapshot) while that spell still sits on the stack - almost
+        // always true (priority passes after every cast), but not a
+        // logical guarantee the way "what did our own decision choose" is.
+        // De-duplicated against the *immediately preceding* logged stack
+        // for this game (not "ever seen"), so a still-resolving spell
+        // isn't recounted every time we get asked something while it
+        // waits, but a later, genuinely new cast of the same card still
+        // counts.
+        Set<String> currentStackKeys = new HashSet<>();
+        for (JsonNode item : state.path("stack")) {
+            JsonNode source = item.path("source");
+            String key = source.path("id").asText("") + "|" + item.path("description").asText("");
+            currentStackKeys.add(key);
+            if (track.prevStackKeys.contains(key)) {
+                continue;
+            }
+            String role = item.path("spellRole").asText(null);
+            boolean itemIsYou = source.path("controllerIsYou").asBoolean();
+            if ("REMOVAL".equals(role)) {
+                if (itemIsYou) {
+                    track.removalCastViaStackYou++;
+                } else {
+                    track.removalCastOpp++;
+                }
+            } else if ("SWEEPER".equals(role)) {
+                if (itemIsYou) {
+                    track.sweeperCastViaStackYou++;
+                } else {
+                    track.sweeperCastOpp++;
+                }
+            } else if ("RAMP".equals(role)) {
+                if (itemIsYou) {
+                    track.rampSpellCastYou++;
+                } else {
+                    track.rampSpellCastOpp++;
+                }
+            }
+        }
+        track.prevStackKeys = currentStackKeys;
 
         // Only ever observable for the logging (RULE_BASED_V2) side - see
         // class javadoc.
@@ -168,7 +238,7 @@ public final class DecisionLogStats {
         return winners;
     }
 
-    private static class GameTrack {
+    static class GameTrack {
         String youName;
         String oppName;
         // turn -> (isYou -> last-seen PlayerStateView that turn)
@@ -176,15 +246,31 @@ public final class DecisionLogStats {
         Map<Boolean, Integer> commanderTurn = new HashMap<>();
         int maxTurn = 0;
         int mulligansTaken = 0;
+        // Precise (chosen-option-based, RULE_BASED_V2/"you" only).
         int removalCast = 0;
         int sweeperCast = 0;
+        // Approximate (stack-observation-based, see ingest()'s comment) -
+        // available for both sides, including a "you" cross-check against
+        // the precise counters above.
+        int removalCastViaStackYou = 0;
+        int sweeperCastViaStackYou = 0;
+        int removalCastOpp = 0;
+        int sweeperCastOpp = 0;
+        int rampSpellCastYou = 0;
+        int rampSpellCastOpp = 0;
+        Set<String> prevStackKeys = new HashSet<>();
+        // Mana rocks/dorks (board-observation-based, see ingest()) - first
+        // sighting of each card id only.
+        Map<Boolean, Set<String>> seenManaRockIds = new HashMap<>();
+        int manaRocksYou = 0;
+        int manaRocksOpp = 0;
         Boolean won;
     }
 
     /** A deck's stat line, keyed by (deckName, aiName) - "Veloci-Ramp-Tor"
      * piloted by RULE_BASED_V2 and the same deck piloted by FORGE_AI are
      * tracked completely separately, which is the entire point. */
-    private static class DeckAiStats {
+    static class DeckAiStats {
         int games;
         long[] landsAt = new long[TURN_CHECKPOINTS.length];
         int[] landsAtCount = new int[TURN_CHECKPOINTS.length];
@@ -200,19 +286,40 @@ public final class DecisionLogStats {
         long commanderCastTurnSum;
         int commanderByTurn5;
         long gameLengthSum;
+        // Approximate (stack/board-observation-based, see ingest()) -
+        // available for both sides.
+        int removalCastViaStack;
+        int sweeperCastViaStack;
+        int rampSpellCast;
+        int manaRocks;
     }
 
     /** RULE_BASED_V2-only stats (mulligans taken, removal/sweeper cast) -
      * kept separate from DeckAiStats since they're never observable for
      * FORGE_AI at all, not just unioned in as zero/missing. */
-    private static class YouOnlyStats {
+    static class YouOnlyStats {
         int games;
         int removalCastSum;
         int sweeperCastSum;
+        // Same spells, counted via the approximate stack-observation
+        // method instead of the precise chosen-option one above - kept
+        // alongside it purely as a sanity check that the two methods
+        // roughly agree (they should, almost always - see ingest()'s
+        // comment for the one known gap).
+        int removalCastViaStackSum;
+        int sweeperCastViaStackSum;
         Map<Integer, int[]> winsByMulligan = new TreeMap<>(); // mulligans -> {wins, total}
     }
 
-    private static String report(Map<String, GameTrack> games) {
+    /** Everything report()/DecisionLogHtmlReport.render() need, computed
+     * once - so a new render format never has to re-walk the games. */
+    static class Aggregation {
+        Map<String, DeckAiStats> byDeckAi;
+        Map<String, YouOnlyStats> youOnlyByDeck;
+        YouOnlyStats youOnlyOverall;
+    }
+
+    private static Aggregation aggregate(Map<String, GameTrack> games) {
         Map<String, DeckAiStats> byDeckAi = new TreeMap<>();
         Map<String, YouOnlyStats> youOnlyByDeck = new TreeMap<>();
         YouOnlyStats youOnlyOverall = new YouOnlyStats();
@@ -271,6 +378,17 @@ public final class DecisionLogStats {
                     s.handSizeAt[ci] += snap.path("handCount").asInt();
                     s.handSizeAtCount[ci]++;
                 }
+                if (isYou) {
+                    s.removalCastViaStack += g.removalCastViaStackYou;
+                    s.sweeperCastViaStack += g.sweeperCastViaStackYou;
+                    s.rampSpellCast += g.rampSpellCastYou;
+                    s.manaRocks += g.manaRocksYou;
+                } else {
+                    s.removalCastViaStack += g.removalCastOpp;
+                    s.sweeperCastViaStack += g.sweeperCastOpp;
+                    s.rampSpellCast += g.rampSpellCastOpp;
+                    s.manaRocks += g.manaRocksOpp;
+                }
 
                 if (isYou) {
                     YouOnlyStats yo = youOnlyByDeck.computeIfAbsent(deckName, k -> new YouOnlyStats());
@@ -278,6 +396,8 @@ public final class DecisionLogStats {
                         target.games++;
                         target.removalCastSum += g.removalCast;
                         target.sweeperCastSum += g.sweeperCast;
+                        target.removalCastViaStackSum += g.removalCastViaStackYou;
+                        target.sweeperCastViaStackSum += g.sweeperCastViaStackYou;
                         if (g.won != null) {
                             int[] wt = target.winsByMulligan.computeIfAbsent(g.mulligansTaken, k -> new int[2]);
                             wt[1]++;
@@ -290,8 +410,20 @@ public final class DecisionLogStats {
             }
         }
 
+        Aggregation agg = new Aggregation();
+        agg.byDeckAi = byDeckAi;
+        agg.youOnlyByDeck = youOnlyByDeck;
+        agg.youOnlyOverall = youOnlyOverall;
+        return agg;
+    }
+
+    private static String report(Aggregation agg, int totalGames) {
+        Map<String, DeckAiStats> byDeckAi = agg.byDeckAi;
+        Map<String, YouOnlyStats> youOnlyByDeck = agg.youOnlyByDeck;
+        YouOnlyStats youOnlyOverall = agg.youOnlyOverall;
+
         StringBuilder sb = new StringBuilder();
-        sb.append("Games tracked: ").append(games.size()).append("\n\n");
+        sb.append("Games tracked: ").append(totalGames).append("\n\n");
         for (var e : byDeckAi.entrySet()) {
             DeckAiStats s = e.getValue();
             sb.append("=== ").append(e.getKey()).append(" (n=").append(s.games).append(") ===\n");
@@ -307,6 +439,9 @@ public final class DecisionLogStats {
                         avg(s.creaturesAt[ci], s.creaturesAtCount[ci]), avg(s.lifeAt[ci], s.lifeAtCount[ci]),
                         avg(s.handSizeAt[ci], s.handSizeAtCount[ci]), s.landsAtCount[ci]));
             }
+            sb.append(String.format("  (approx, via stack/board) removal/game=%.2f  sweeper/game=%.2f  rampSpells/game=%.2f  manaRocks/game=%.2f%n",
+                    avg(s.removalCastViaStack, s.games), avg(s.sweeperCastViaStack, s.games),
+                    avg(s.rampSpellCast, s.games), avg(s.manaRocks, s.games)));
             sb.append("\n");
         }
 
@@ -323,6 +458,8 @@ public final class DecisionLogStats {
     private static void appendYouOnly(StringBuilder sb, YouOnlyStats s) {
         sb.append(String.format("  avg removal cast/game: %.2f   avg sweeper cast/game: %.2f  (n=%d)%n",
                 s.removalCastSum / (double) s.games, s.sweeperCastSum / (double) s.games, s.games));
+        sb.append(String.format("  (cross-check via stack) avg removal/game: %.2f   avg sweeper/game: %.2f%n",
+                s.removalCastViaStackSum / (double) s.games, s.sweeperCastViaStackSum / (double) s.games));
         sb.append("  win rate by mulligans taken:\n");
         for (var m : s.winsByMulligan.entrySet()) {
             int wins = m.getValue()[0];
